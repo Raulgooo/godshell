@@ -55,7 +55,7 @@ type bpfSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
 	TraceConnect *ebpf.ProgramSpec `ebpf:"trace_connect"`
-	TraceExec    *ebpf.ProgramSpec `ebpf:"trace_exec"`
+	TraceExecve  *ebpf.ProgramSpec `ebpf:"trace_execve"`
 	TraceExit    *ebpf.ProgramSpec `ebpf:"trace_exit"`
 	TraceOpenat  *ebpf.ProgramSpec `ebpf:"trace_openat"`
 }
@@ -71,6 +71,7 @@ type bpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
+	GodshellPid *ebpf.VariableSpec `ebpf:"godshell_pid"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -106,6 +107,7 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
+	GodshellPid *ebpf.Variable `ebpf:"godshell_pid"`
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.
@@ -113,7 +115,7 @@ type bpfVariables struct {
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
 	TraceConnect *ebpf.Program `ebpf:"trace_connect"`
-	TraceExec    *ebpf.Program `ebpf:"trace_exec"`
+	TraceExecve  *ebpf.Program `ebpf:"trace_execve"`
 	TraceExit    *ebpf.Program `ebpf:"trace_exit"`
 	TraceOpenat  *ebpf.Program `ebpf:"trace_openat"`
 }
@@ -121,7 +123,7 @@ type bpfPrograms struct {
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
 		p.TraceConnect,
-		p.TraceExec,
+		p.TraceExecve,
 		p.TraceExit,
 		p.TraceOpenat,
 	)
