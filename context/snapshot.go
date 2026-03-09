@@ -1,6 +1,7 @@
 package ctxengine
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -653,6 +654,230 @@ func totalEffects(p *ProcessNode) int {
 		total += int(eff.Count)
 	}
 	return total
+}
+
+// ── JSON Endpoints ─────────────────────────────────────────────────────────
+
+type EffectJSON struct {
+	Label    string `json:"label"`
+	Count    uint64 `json:"count"`
+	Unique   int    `json:"unique_targets,omitempty"`
+	Category string `json:"category"`          // "open" or "connect"
+	Subtype  string `json:"subtype,omitempty"` // "unix_socket" or "network"
+}
+
+type ProcessJSON struct {
+	PID         uint32       `json:"pid"`
+	PPID        uint32       `json:"ppid"`
+	Name        string       `json:"name"`
+	TotalOpens  int          `json:"total_opens"`
+	TotalConns  int          `json:"total_connections"`
+	CpuUsage    float64      `json:"cpu_usage_percent"`
+	MemoryUsage uint64       `json:"memory_usage_kb"`
+	TopEffects  []EffectJSON `json:"top_effects"`
+	MoreEffects int          `json:"more_effects_count"`
+}
+
+type ProcessInspectJSON struct {
+	PID            uint32       `json:"pid"`
+	PPID           uint32       `json:"ppid"`
+	Comm           string       `json:"comm"`
+	BinaryPath     string       `json:"binary_path,omitempty"`
+	State          string       `json:"state"`
+	Uptime         string       `json:"uptime"`
+	StartTime      time.Time    `json:"start_time"`
+	EndTime        *time.Time   `json:"end_time,omitempty"`
+	CpuUsage       float64      `json:"cpu_usage_percent"`
+	MemoryUsage    uint64       `json:"memory_usage_kb"`
+	Parent         string       `json:"parent"` // formatted name (pid)
+	Children       []ChildJSON  `json:"children"`
+	NetworkEffects []EffectJSON `json:"network_effects"`
+	FileEffects    []EffectJSON `json:"file_effects"`
+}
+
+type ChildJSON struct {
+	PID   uint32 `json:"pid"`
+	Comm  string `json:"comm"`
+	State string `json:"state"`
+}
+
+type SearchMatchJSON struct {
+	PID        uint32 `json:"pid"`
+	Comm       string `json:"comm"`
+	MatchKind  string `json:"match_kind"` // "process" or "effect"
+	EffectKind string `json:"effect_kind,omitempty"`
+	Target     string `json:"target,omitempty"`
+	Count      uint64 `json:"count,omitempty"`
+	LastSeen   string `json:"last_seen,omitempty"`
+}
+
+type FamilyNodeJSON struct {
+	PID      uint32            `json:"pid"`
+	Comm     string            `json:"comm"`
+	IsTarget bool              `json:"is_target"`
+	Children []*FamilyNodeJSON `json:"children,omitempty"`
+}
+
+type AppGroupJSON struct {
+	Name      string        `json:"group_name"`
+	PIDs      []uint32      `json:"pids"`
+	Processes []ProcessJSON `json:"processes"`
+}
+
+type GhostJSON struct {
+	Name     string `json:"name"`
+	PID      uint32 `json:"pid"`
+	Duration string `json:"lifespan_duration"`
+	Opens    uint64 `json:"total_opens"`
+	Connects uint64 `json:"total_connections"`
+}
+
+type SnapshotSummaryJSON struct {
+	Timestamp      time.Time      `json:"timestamp"`
+	ActiveGroups   []AppGroupJSON `json:"active_groups"`
+	RecentlyExited []GhostJSON    `json:"recently_exited,omitempty"`
+}
+
+// SummaryJSON returns a structured JSON equivalent of Summary()
+func (fs *FrozenSnapshot) SummaryJSON() (string, error) {
+	summary := SnapshotSummaryJSON{
+		Timestamp:      fs.Timestamp,
+		ActiveGroups:   []AppGroupJSON{},
+		RecentlyExited: []GhostJSON{},
+	}
+
+	// Group strictly matching TUI logic
+	type appGroup struct {
+		Name  string
+		Procs []*ProcessNode
+	}
+	groupsMap := make(map[string]*appGroup)
+
+	for _, p := range fs.ByPID {
+		k := groupKeyFrozen(p, fs)
+		if _, ok := groupsMap[k]; !ok {
+			groupsMap[k] = &appGroup{Name: k, Procs: make([]*ProcessNode, 0)}
+		}
+		groupsMap[k].Procs = append(groupsMap[k].Procs, p)
+	}
+
+	var groups []*appGroup
+	for _, g := range groupsMap {
+		groups = append(groups, g)
+	}
+
+	sort.Slice(groups, func(i, j int) bool {
+		return len(groups[i].Procs) > len(groups[j].Procs)
+	})
+
+	for _, g := range groups {
+		groupJson := AppGroupJSON{
+			Name:      g.Name,
+			PIDs:      []uint32{},
+			Processes: []ProcessJSON{},
+		}
+		for _, p := range g.Procs {
+			groupJson.PIDs = append(groupJson.PIDs, p.PID)
+		}
+
+		sort.Slice(g.Procs, func(i, j int) bool {
+			return totalEffects(g.Procs[i]) > totalEffects(g.Procs[j])
+		})
+
+		for _, p := range g.Procs {
+			effects := collapseEffects(p.Effects)
+
+			opens := 0
+			connects := 0
+			for _, eff := range p.Effects {
+				if eff.Kind == EffectOpen {
+					opens += int(eff.Count)
+				} else {
+					connects += int(eff.Count)
+				}
+			}
+
+			procJson := ProcessJSON{
+				PID:         p.PID,
+				PPID:        p.PPID,
+				Name:        p.Comm,
+				TotalOpens:  opens,
+				TotalConns:  connects,
+				CpuUsage:    p.CpuUsage,
+				MemoryUsage: p.MemoryUsage,
+				TopEffects:  []EffectJSON{},
+			}
+			if p.BinaryPath != "" {
+				procJson.Name = p.BinaryPath
+			}
+
+			effLimit := 3
+			if len(effects) < effLimit {
+				effLimit = len(effects)
+			}
+
+			for _, eff := range effects[:effLimit] {
+				effJson := EffectJSON{
+					Label:  eff.Label,
+					Count:  eff.Count,
+					Unique: eff.Unique,
+				}
+				if eff.Kind == EffectOpen {
+					effJson.Category = "open"
+				} else {
+					effJson.Category = "connect"
+					if strings.HasPrefix(eff.Original, "unix:") {
+						effJson.Subtype = "unix_socket"
+						effJson.Label = eff.Original[5:]
+					} else {
+						effJson.Subtype = "network"
+					}
+				}
+				procJson.TopEffects = append(procJson.TopEffects, effJson)
+			}
+			procJson.MoreEffects = len(effects) - effLimit
+			groupJson.Processes = append(groupJson.Processes, procJson)
+		}
+		summary.ActiveGroups = append(summary.ActiveGroups, groupJson)
+	}
+
+	// Ghosts matching TUI logic
+	var ghosts []*ProcessNode
+	for _, g := range fs.Ghosts {
+		ghosts = append(ghosts, g)
+	}
+	sort.Slice(ghosts, func(i, j int) bool {
+		return ghosts[i].EndTimestamp.After(ghosts[j].EndTimestamp)
+	})
+
+	for _, g := range ghosts {
+		name := g.Comm
+		if len(g.BinaryPath) > 0 {
+			name = filepath.Base(g.BinaryPath)
+		}
+		var opens, connects uint64
+		for _, eff := range g.Effects {
+			if eff.Kind == EffectOpen {
+				opens += eff.Count
+			} else {
+				connects += eff.Count
+			}
+		}
+
+		summary.RecentlyExited = append(summary.RecentlyExited, GhostJSON{
+			Name:     name,
+			PID:      g.PID,
+			Duration: g.EndTimestamp.Sub(g.StartTimestamp).Round(time.Millisecond).String(),
+			Opens:    opens,
+			Connects: connects,
+		})
+	}
+
+	bytes, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(bytes), nil
 }
 
 // suppress unused import

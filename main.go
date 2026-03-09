@@ -6,7 +6,9 @@ import (
 	"fmt"
 	ctxengine "godshell/context"
 	"godshell/observer"
+	"godshell/store"
 	"log"
+
 	"os"
 	"os/signal"
 	"strings"
@@ -23,6 +25,10 @@ func main() {
 	tree := ctxengine.NewProcessTree()
 	go tree.EvictGhosts(60 * time.Second)
 	go tree.RefreshMetrics(5 * time.Second)
+
+	if err := store.Init("godshell.db"); err != nil {
+		log.Fatalf("failed to initialize store: %v", err)
+	}
 
 	events := make(chan observer.Event, 256)
 	go func() {
@@ -130,9 +136,37 @@ func main() {
 							} else {
 								fmt.Println("Usage: r <pid> <address_hex> [size]")
 							}
+						case "save":
+							id, err := store.SaveSnapshot(arg, snap)
+							if err != nil {
+								fmt.Printf("Save error: %v\n", err)
+							} else {
+								fmt.Printf("Snapshot saved as ID %d (label: %s)\n", id, arg)
+							}
+						case "load":
+							var id int64
+							fmt.Sscanf(arg, "%d", &id)
+							newSnap, err := store.LoadSnapshot(id)
+							if err != nil {
+								fmt.Printf("Load error: %v\n", err)
+							} else {
+								snap = newSnap
+								fmt.Printf("Switched to loaded snapshot %d (%s)\n", id, snap.Timestamp.Format(time.RFC3339))
+							}
+						case "list":
+							list, err := store.ListSnapshots()
+							if err != nil {
+								fmt.Printf("List error: %v\n", err)
+							} else {
+								fmt.Println("Stored Snapshots:")
+								for _, m := range list {
+									fmt.Printf("  [%d] %s (%v)\n", m.ID, m.Label, m.Timestamp.Format(time.Kitchen))
+								}
+							}
 						case "q":
 							fmt.Println("Exited snapshot mode.")
 							break snapshotLoop
+
 						default:
 							fmt.Println("Unknown command inside snapshot mode.")
 							fmt.Println("Commands: [i]nspect, [f]amily, [s]earch, [m]aps, [l]ibraries, [t]race, [c]at file, [r]ead mem, [q]uit")

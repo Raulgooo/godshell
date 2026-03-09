@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -782,4 +784,295 @@ func (fs *FrozenSnapshot) ReadMemory(pid uint32, address uint64, size int64) str
 	builder.WriteString(hex.Dump(buf[:n]))
 
 	return builder.String()
+}
+
+// ── JSON Endpoints ─────────────────────────────────────────────────────────
+
+// InspectJSON returns a structured JSON variant of Inspect()
+func (fs *FrozenSnapshot) InspectJSON(pid uint32) (string, error) {
+	p, ok := fs.ByPID[pid]
+	if !ok {
+		p, ok = fs.Ghosts[pid]
+		if !ok {
+			return "", fmt.Errorf("process %d not found", pid)
+		}
+	}
+
+	state := "ACTIVE"
+	uptime := time.Since(p.StartTimestamp).Round(time.Millisecond)
+	if !p.EndTimestamp.IsZero() {
+		state = "EXITED"
+		uptime = p.EndTimestamp.Sub(p.StartTimestamp).Round(time.Millisecond)
+	}
+
+	resp := ProcessInspectJSON{
+		PID:            p.PID,
+		PPID:           p.PPID,
+		Comm:           p.Comm,
+		BinaryPath:     p.BinaryPath,
+		State:          state,
+		Uptime:         uptime.String(),
+		StartTime:      p.StartTimestamp,
+		CpuUsage:       p.CpuUsage,
+		MemoryUsage:    p.MemoryUsage,
+		Children:       []ChildJSON{},
+		NetworkEffects: []EffectJSON{},
+		FileEffects:    []EffectJSON{},
+	}
+	if !p.EndTimestamp.IsZero() {
+		resp.EndTime = &p.EndTimestamp
+	}
+
+	// Parent info
+	resp.Parent = fmt.Sprintf("%d", p.PPID)
+	if p.PPID > 0 {
+		if parent, found := fs.ByPID[p.PPID]; found {
+			resp.Parent = fmt.Sprintf("%s (%d)", parent.Comm, p.PPID)
+		} else if parent, found := fs.Ghosts[p.PPID]; found {
+			resp.Parent = fmt.Sprintf("%s (%d) [EXITED]", parent.Comm, p.PPID)
+		}
+	}
+
+	// Children info
+	for _, cpid := range p.ChildrenPID {
+		childState := "UNKNOWN"
+		comm := ""
+		if child, found := fs.ByPID[cpid]; found {
+			childState = "ACTIVE"
+			comm = child.Comm
+		} else if child, found := fs.Ghosts[cpid]; found {
+			childState = "EXITED"
+			comm = child.Comm
+		}
+		resp.Children = append(resp.Children, ChildJSON{
+			PID:   cpid,
+			Comm:  comm,
+			State: childState,
+		})
+	}
+
+	// Effects
+	for _, eff := range p.Effects {
+		effJ := EffectJSON{
+			Label: eff.Target,
+			Count: eff.Count,
+		}
+		if eff.Kind == EffectOpen {
+			effJ.Category = "open"
+			resp.FileEffects = append(resp.FileEffects, effJ)
+		} else {
+			effJ.Category = "connect"
+			if strings.HasPrefix(eff.Target, "unix:") {
+				effJ.Subtype = "unix_socket"
+				effJ.Label = eff.Target[5:]
+			} else {
+				effJ.Subtype = "network"
+			}
+			resp.NetworkEffects = append(resp.NetworkEffects, effJ)
+		}
+	}
+
+	bytes, err := json.MarshalIndent(resp, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(bytes), nil
+}
+
+// SearchJSON returns search results in structured JSON format
+func (fs *FrozenSnapshot) SearchJSON(query string) (string, error) {
+	results := []SearchMatchJSON{}
+	re, err := regexp.Compile("(?i)" + query)
+	if err != nil {
+		return "", err
+	}
+
+	for _, p := range fs.ByPID {
+		match := false
+		if re.MatchString(p.Comm) || re.MatchString(p.BinaryPath) {
+			match = true
+			results = append(results, SearchMatchJSON{
+				PID:       p.PID,
+				Comm:      p.Comm,
+				MatchKind: "process",
+			})
+		}
+
+		for _, eff := range p.Effects {
+			if re.MatchString(eff.Target) {
+				matchKind := "effect"
+				if match {
+					matchKind = "both"
+				}
+
+				effKind := "open"
+				if eff.Kind == EffectConnect {
+					effKind = "connect"
+				}
+
+				results = append(results, SearchMatchJSON{
+					PID:        p.PID,
+					Comm:       p.Comm,
+					MatchKind:  matchKind,
+					EffectKind: effKind,
+					Target:     eff.Target,
+					Count:      eff.Count,
+					LastSeen:   eff.Last.Format(time.RFC3339),
+				})
+			}
+		}
+	}
+
+	// Also search ghosts
+	for _, p := range fs.Ghosts {
+		// Same logic as active
+		if re.MatchString(p.Comm) || re.MatchString(p.BinaryPath) {
+			results = append(results, SearchMatchJSON{
+				PID:       p.PID,
+				Comm:      p.Comm,
+				MatchKind: "process",
+			})
+		}
+		for _, eff := range p.Effects {
+			if re.MatchString(eff.Target) {
+				effKind := "open"
+				if eff.Kind == EffectConnect {
+					effKind = "connect"
+				}
+				results = append(results, SearchMatchJSON{
+					PID:        p.PID,
+					Comm:       p.Comm,
+					MatchKind:  "effect",
+					EffectKind: effKind,
+					Target:     eff.Target,
+					Count:      eff.Count,
+					LastSeen:   eff.Last.Format(time.RFC3339),
+				})
+			}
+		}
+	}
+
+	bytes, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(bytes), nil
+}
+
+// ProcessFamilyJSON returns the process lineage in a recursive JSON structure
+func (fs *FrozenSnapshot) ProcessFamilyJSON(pid uint32) (string, error) {
+	// We reuse the logic from ProcessFamily but structure it for JSON
+	// Helper to lookup processes, including dynamically resolving untracked ones
+	untracked := make(map[uint32]*ProcessNode)
+	childrenMap := make(map[uint32][]uint32)
+
+	readUntracked := func(pid uint32) *ProcessNode {
+		if p, ok := untracked[pid]; ok {
+			return p
+		}
+		commBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+		if err != nil {
+			return nil
+		}
+		comm := strings.TrimSpace(string(commBytes))
+
+		statusBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+		var ppid uint32
+		if err == nil {
+			for _, line := range strings.Split(string(statusBytes), "\n") {
+				if strings.HasPrefix(line, "PPid:") {
+					fields := strings.Fields(line)
+					if len(fields) == 2 {
+						fmt.Sscanf(fields[1], "%d", &ppid)
+					}
+					break
+				}
+			}
+		}
+
+		node := &ProcessNode{
+			PID:  pid,
+			PPID: ppid,
+			Comm: comm + " [UNTRACKED]",
+		}
+		untracked[pid] = node
+		childrenMap[ppid] = append(childrenMap[ppid], pid)
+		return node
+	}
+
+	getNode := func(pid uint32) (*ProcessNode, bool) {
+		if p, ok := fs.ByPID[pid]; ok {
+			return p, true
+		}
+		if p, ok := fs.Ghosts[pid]; ok {
+			return p, true
+		}
+		if p, ok := untracked[pid]; ok {
+			return p, true
+		}
+		return nil, false
+	}
+
+	target, ok := getNode(pid)
+	if !ok {
+		target = readUntracked(pid)
+		if target == nil {
+			return "", fmt.Errorf("process %d not found", pid)
+		}
+	}
+
+	for p_id, p := range fs.ByPID {
+		childrenMap[p.PPID] = append(childrenMap[p.PPID], p_id)
+	}
+	for p_id, p := range fs.Ghosts {
+		childrenMap[p.PPID] = append(childrenMap[p.PPID], p_id)
+	}
+
+	// Walk up to root
+	root := target
+	chain := make(map[uint32]bool)
+	chain[target.PID] = true
+	for {
+		if root.PPID == 0 || root.PPID == 1 || root.PPID == 2 {
+			break
+		}
+		parent, ok := getNode(root.PPID)
+		if !ok {
+			parent = readUntracked(root.PPID)
+			if parent == nil {
+				break
+			}
+		}
+		root = parent
+		chain[root.PID] = true
+	}
+
+	// Build recursive JSON
+	var buildNode func(pid uint32) *FamilyNodeJSON
+	buildNode = func(pid uint32) *FamilyNodeJSON {
+		node, _ := getNode(pid)
+		fNode := &FamilyNodeJSON{
+			PID:      pid,
+			Comm:     node.Comm,
+			IsTarget: pid == target.PID,
+		}
+
+		children := childrenMap[pid]
+		sort.Slice(children, func(i, j int) bool { return children[i] < children[j] })
+
+		for _, cpid := range children {
+			// Optimization: only recurse into active/ghost/untracked nodes we care about
+			// or if they are in the ancestry chain we've already resolved.
+			// Actually for family view we want all children.
+			fNode.Children = append(fNode.Children, buildNode(cpid))
+		}
+		return fNode
+	}
+
+	rootJSON := buildNode(root.PID)
+	bytes, err := json.MarshalIndent(rootJSON, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(bytes), nil
 }

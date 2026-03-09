@@ -1,6 +1,7 @@
 package ctxengine
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 )
@@ -25,6 +26,47 @@ type Effect struct {
 
 type EffectDetail interface {
 	effectDetail()
+}
+
+type rawEffect struct {
+	Kind   EffectKind      `json:"Kind"`
+	Target string          `json:"Target"`
+	Count  uint64          `json:"Count"`
+	First  time.Time       `json:"First"`
+	Last   time.Time       `json:"Last"`
+	Detail json.RawMessage `json:"Detail"`
+}
+
+func (e *Effect) UnmarshalJSON(data []byte) error {
+	var raw rawEffect
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	e.Kind = raw.Kind
+	e.Target = raw.Target
+	e.Count = raw.Count
+	e.First = raw.First
+	e.Last = raw.Last
+
+	if len(raw.Detail) > 0 && string(raw.Detail) != "null" {
+		switch e.Kind {
+		case EffectOpen:
+			var detail OpenDetail
+			if err := json.Unmarshal(raw.Detail, &detail); err != nil {
+				return err
+			}
+			e.Detail = detail
+		case EffectConnect:
+			var detail ConnectDetail
+			if err := json.Unmarshal(raw.Detail, &detail); err != nil {
+				return err
+			}
+			e.Detail = detail
+		}
+	}
+
+	return nil
 }
 
 type OpenDetail struct {
