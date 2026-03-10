@@ -3,11 +3,15 @@ package ctxengine
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -594,6 +598,288 @@ func (fs *FrozenSnapshot) GetLinkedLibraries(pid uint32) string {
 			pathOnly := strings.Split(line, " (")[0]
 			b.WriteString(fmt.Sprintf("%-30s [builtin or absolute]\n", pathOnly))
 		}
+	}
+
+	return b.String()
+}
+
+// HashBinary computes the SHA256 hash of the executable associated with a process.
+func (fs *FrozenSnapshot) HashBinary(pid uint32) string {
+	p, ok := fs.ByPID[pid]
+	if !ok {
+		p, ok = fs.Ghosts[pid]
+		if !ok {
+			return fmt.Errorf("[Hash Binary: %d] Process not found in snapshot.", pid).Error()
+		}
+	}
+
+	exePath := fmt.Sprintf("/proc/%d/exe", pid)
+	// If process is a ghost (or permission denied), try its recorded BinaryPath
+	if _, err := os.Stat(exePath); os.IsNotExist(err) || err != nil {
+		if p.BinaryPath != "" {
+			exePath = p.BinaryPath
+		} else {
+			return fmt.Sprintf("[Hash Binary: %d] (%s)\nCannot find executable path to hash. Process may have exited and no binary path was recorded.", pid, p.Comm)
+		}
+	}
+
+	// Double check if we can read the file we resolved
+	file, err := os.Open(exePath)
+	if err != nil {
+		return fmt.Sprintf("[Hash Binary: %d] (%s)\nError opening executable %s: %v", pid, p.Comm, exePath, err)
+	}
+	defer file.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return fmt.Sprintf("[Hash Binary: %d] (%s)\nError hashing executable %s: %v", pid, p.Comm, exePath, err)
+	}
+
+	hashStr := hex.EncodeToString(hash.Sum(nil))
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("[Hash Binary: %d] (%s) (Snapshot from %s)\n", pid, p.Comm, fs.Timestamp.Format(time.RFC3339)))
+	b.WriteString(fmt.Sprintf("Binary: %s\n", exePath))
+	b.WriteString(fmt.Sprintf("SHA256: %s\n", hashStr))
+
+	return b.String()
+}
+
+// ExtractStrings runs the `strings` command on a binary to extract printable characters.
+func (fs *FrozenSnapshot) ExtractStrings(path string, minLength int) string {
+	if minLength <= 0 {
+		minLength = 8 // Default min length
+	}
+
+	// Verify file exists
+	if _, err := os.Stat(path); os.IsNotExist(err) || err != nil {
+		return fmt.Sprintf("[Extract Strings: %s]\nCannot access file: %v", path, err)
+	}
+
+	cmd := exec.Command("strings", "-a", "-n", fmt.Sprintf("%d", minLength), path)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("[Extract Strings: %s]\nError running strings: %v\nOutput: %s", path, err, string(output))
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("[Extract Strings: %s] (Min Length: %d) (Snapshot from %s)\n\n", path, minLength, fs.Timestamp.Format(time.RFC3339)))
+
+	// Limit output to prevent LLM context explosion.
+	lines := strings.Split(string(output), "\n")
+	limit := 200
+	if len(lines) > limit {
+		b.WriteString(strings.Join(lines[:limit], "\n"))
+		b.WriteString(fmt.Sprintf("\n... (Output truncated, %d total strings found) ...\n", len(lines)))
+	} else {
+		b.WriteString(string(output))
+	}
+
+	return b.String()
+}
+
+// ReadShellHistory retrieves the last N lines of a user's shell history.
+func (fs *FrozenSnapshot) ReadShellHistory(username string, limit int) string {
+	if limit <= 0 {
+		limit = 50 // default to last 50 lines
+	}
+
+	u, err := user.Lookup(username)
+	if err != nil {
+		return fmt.Sprintf("[Read Shell History: %s]\nError looking up user: %v", username, err)
+	}
+
+	historyFiles := []string{
+		filepath.Join(u.HomeDir, ".zsh_history"),
+		filepath.Join(u.HomeDir, ".bash_history"),
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("[Read Shell History: %s] (Limit: %d lines) (Snapshot from %s)\n\n", username, limit, fs.Timestamp.Format(time.RFC3339)))
+
+	foundAny := false
+	for _, historyFile := range historyFiles {
+		content, err := os.ReadFile(historyFile)
+		if err != nil {
+			continue // skip if not found or cannot read
+		}
+
+		foundAny = true
+		b.WriteString(fmt.Sprintf("--- From: %s ---\n", historyFile))
+
+		lines := strings.Split(string(content), "\n")
+		// Remove empty trailing line if present
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+
+		startIdx := 0
+		if len(lines) > limit {
+			startIdx = len(lines) - limit
+		}
+
+		for _, line := range lines[startIdx:] {
+			// Basic cleanup of zsh timestamp format: ": 1690000000:0;command"
+			if strings.HasPrefix(line, ": ") {
+				if parts := strings.SplitN(line, ";", 2); len(parts) == 2 {
+					line = parts[1]
+				}
+			}
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("\n")
+	}
+
+	if !foundAny {
+		b.WriteString("Could not read any standard shell history files (.zsh_history, .bash_history) for the user.\nCheck permissions or if the user uses a different shell.\n")
+	}
+
+	return b.String()
+}
+
+// NetworkState extracts active connections and their detailed state directly from /proc/<pid>/net/tcp and tcp6.
+func (fs *FrozenSnapshot) NetworkState(pid uint32) string {
+	p, ok := fs.ByPID[pid]
+	if !ok {
+		p, ok = fs.Ghosts[pid]
+		if !ok {
+			return fmt.Sprintf("[Network State: %d] Process not found in snapshot.", pid)
+		}
+	}
+
+	netFiles := []string{
+		fmt.Sprintf("/proc/%d/net/tcp", pid),
+		fmt.Sprintf("/proc/%d/net/tcp6", pid),
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("[Network State: %d] (%s) (Snapshot from %s)\n\n", pid, p.Comm, fs.Timestamp.Format(time.RFC3339)))
+	b.WriteString(fmt.Sprintf("%-25s %-25s %s\n", "LOCAL_ADDRESS", "REMOTE_ADDRESS", "STATE"))
+	b.WriteString(strings.Repeat("-", 60) + "\n")
+
+	// Helper to parse hex IP and Port
+	parseHexIPPort := func(hexStr string, isV6 bool) string {
+		parts := strings.Split(hexStr, ":")
+		if len(parts) != 2 {
+			return hexStr
+		}
+		ipHex := parts[0]
+		portHex := parts[1]
+
+		var ipStr string
+		if isV6 {
+			// Basic formatting for IPv6 (not fully compliant, but enough for readable logs)
+			// Reverse every 4 hex chars because of endianness in /proc/net/tcp6
+			ipStr = ipHex // Keep raw hex for now for simplicity, it's a known limitation
+		} else {
+			if len(ipHex) == 8 {
+				ipParsed := []byte{0, 0, 0, 0}
+				fmt.Sscanf(ipHex, "%02x%02x%02x%02x", &ipParsed[3], &ipParsed[2], &ipParsed[1], &ipParsed[0])
+				ipStr = fmt.Sprintf("%d.%d.%d.%d", ipParsed[0], ipParsed[1], ipParsed[2], ipParsed[3])
+			} else {
+				ipStr = ipHex
+			}
+		}
+
+		var port int
+		fmt.Sscanf(portHex, "%X", &port)
+
+		return fmt.Sprintf("%s:%d", ipStr, port)
+	}
+
+	states := map[string]string{
+		"01": "ESTABLISHED",
+		"02": "SYN_SENT",
+		"03": "SYN_RECV",
+		"04": "FIN_WAIT1",
+		"05": "FIN_WAIT2",
+		"06": "TIME_WAIT",
+		"07": "CLOSE",
+		"08": "CLOSE_WAIT",
+		"09": "LAST_ACK",
+		"0A": "LISTEN",
+		"0B": "CLOSING",
+	}
+
+	connCount := 0
+	for _, netFile := range netFiles {
+		isV6 := strings.HasSuffix(netFile, "6")
+		content, err := os.ReadFile(netFile)
+		if err != nil {
+			continue
+		}
+
+		lines := strings.Split(string(content), "\n")
+		// Skip header line
+		for i := 1; i < len(lines); i++ {
+			line := strings.TrimSpace(lines[i])
+			if line == "" {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) < 4 {
+				continue
+			}
+
+			localAddr := parseHexIPPort(fields[1], isV6)
+			remoteAddr := parseHexIPPort(fields[2], isV6)
+			stateHex := fields[3]
+			stateStr := states[stateHex]
+			if stateStr == "" {
+				stateStr = stateHex
+			}
+
+			b.WriteString(fmt.Sprintf("%-25s %-25s %s\n", localAddr, remoteAddr, stateStr))
+			connCount++
+		}
+	}
+
+	if connCount == 0 {
+		b.WriteString("No active TCP connections found in /proc/<pid>/net/tcp.\n")
+	}
+
+	return b.String()
+}
+
+// ReadEnviron parses and returns the environment variables for a process.
+func (fs *FrozenSnapshot) ReadEnviron(pid uint32) string {
+	p, ok := fs.ByPID[pid]
+	if !ok {
+		p, ok = fs.Ghosts[pid]
+		if !ok {
+			return fmt.Sprintf("[Read Environ: %d] Process not found in snapshot.", pid)
+		}
+	}
+
+	envPath := fmt.Sprintf("/proc/%d/environ", pid)
+	content, err := os.ReadFile(envPath)
+	if err != nil {
+		return fmt.Sprintf("[Read Environ: %d] (%s)\nError reading %s: %v\n(Check permissions, or process may have exited)", pid, p.Comm, envPath, err)
+	}
+
+	if len(content) == 0 {
+		return fmt.Sprintf("[Read Environ: %d] (%s)\nEnvironment is empty.", pid, p.Comm)
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("[Read Environ: %d] (%s) (Snapshot from %s)\n\n", pid, p.Comm, fs.Timestamp.Format(time.RFC3339)))
+
+	// /proc/<pid>/environ is null-byte separated
+	vars := bytes.Split(content, []byte{0})
+
+	// Convert to string slice and sort for readability
+	var strVars []string
+	for _, v := range vars {
+		s := string(v)
+		if s != "" { // final split might be empty
+			strVars = append(strVars, s)
+		}
+	}
+	sort.Strings(strVars)
+
+	for _, v := range strVars {
+		b.WriteString(v)
+		b.WriteString("\n")
 	}
 
 	return b.String()

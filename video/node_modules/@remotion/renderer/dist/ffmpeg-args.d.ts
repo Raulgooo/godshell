@@ -1,0 +1,21 @@
+import type { HardwareAccelerationOption } from './client';
+import type { Codec } from './codec';
+import type { LogLevel } from './log-level';
+import { type ColorSpace } from './options/color-space';
+import type { X264Preset } from './options/x264-preset';
+import type { PixelFormat } from './pixel-format';
+export declare const generateFfmpegArgs: ({ hasPreencoded, proResProfileName, pixelFormat, x264Preset, codec, crf, videoBitrate, encodingMaxRate, encodingBufferSize, colorSpace, hardwareAcceleration, indent, logLevel, }: {
+    hasPreencoded: boolean;
+    proResProfileName: string | null;
+    pixelFormat: PixelFormat;
+    x264Preset: X264Preset | null;
+    crf: unknown;
+    codec: Codec;
+    videoBitrate: string | null;
+    encodingMaxRate: string | null;
+    encodingBufferSize: string | null;
+    colorSpace: ColorSpace | null;
+    hardwareAcceleration: HardwareAccelerationOption;
+    indent: boolean;
+    logLevel: LogLevel;
+}) => string[][];

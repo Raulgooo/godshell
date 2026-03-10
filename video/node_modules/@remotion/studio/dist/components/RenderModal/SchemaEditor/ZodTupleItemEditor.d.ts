@@ -1,0 +1,15 @@
+import type { UpdaterFunction } from './ZodSwitch';
+import type { JSONPath } from './zod-types';
+export declare const ZodTupleItemEditor: React.FC<{
+    jsonPath: JSONPath;
+    onChange: UpdaterFunction<unknown[]>;
+    def: any;
+    index: number;
+    value: unknown;
+    defaultValue: unknown;
+    onSave: UpdaterFunction<unknown[]>;
+    showSaveButton: boolean;
+    saving: boolean;
+    saveDisabledByParent: boolean;
+    mayPad: boolean;
+}>;

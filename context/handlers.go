@@ -38,7 +38,7 @@ func (t *ProcessTree) handleExec(e observer.Event) {
 	proc := &ProcessNode{
 		PID:            e.Pid,
 		BinaryPath:     e.PathStr(),
-		Comm:           e.CommStr(),
+		Comm:           readCmdline(e.Pid, e.CommStr()),
 		Effects:        make(map[string]*Effect),
 		StartTimestamp: time.Now(),
 	}
@@ -147,7 +147,7 @@ func (t *ProcessTree) getOrCreateProc(e observer.Event) *ProcessNode {
 	}
 	proc := &ProcessNode{
 		PID:            e.Pid,
-		Comm:           e.CommStr(),
+		Comm:           readCmdline(e.Pid, e.CommStr()),
 		BinaryPath:     readBinaryPath(e.Pid),
 		Effects:        make(map[string]*Effect),
 		StartTimestamp: time.Now(),
@@ -165,6 +165,22 @@ func readBinaryPath(pid uint32) string {
 		return ""
 	}
 	return target
+}
+
+// readCmdline reads the full command line from /proc/<pid>/cmdline.
+// It replaces null bytes with spaces to return a clean string.
+func readCmdline(pid uint32, fallback string) string {
+	cmdlineBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil || len(cmdlineBytes) == 0 {
+		return fallback
+	}
+
+	cmdline := strings.ReplaceAll(string(cmdlineBytes), "\x00", " ")
+	cmdline = strings.TrimSpace(cmdline)
+	if cmdline == "" {
+		return fallback
+	}
+	return cmdline
 }
 
 // EvictGhosts runs in a background goroutine, pruning dead processes

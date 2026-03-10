@@ -1,0 +1,35 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.StudioServerInternals = exports.getDefaultOutLocation = void 0;
+const studio_shared_1 = require("@remotion/studio-shared");
+var studio_shared_2 = require("@remotion/studio-shared");
+Object.defineProperty(exports, "getDefaultOutLocation", { enumerable: true, get: function () { return studio_shared_2.getDefaultOutLocation; } });
+const ansi_diff_1 = require("./ansi-diff");
+const better_opn_1 = require("./better-opn");
+const duplicate_composition_1 = require("./codemods/duplicate-composition");
+const file_watcher_1 = require("./file-watcher");
+const get_latest_remotion_version_1 = require("./get-latest-remotion-version");
+const get_installed_dependencies_1 = require("./helpers/get-installed-dependencies");
+const install_command_1 = require("./helpers/install-command");
+const max_timeline_tracks_1 = require("./max-timeline-tracks");
+const get_package_manager_1 = require("./preview-server/get-package-manager");
+const live_events_1 = require("./preview-server/live-events");
+const update_available_1 = require("./preview-server/update-available");
+const start_studio_1 = require("./start-studio");
+exports.StudioServerInternals = {
+    startStudio: start_studio_1.startStudio,
+    getRemotionVersion: update_available_1.getRemotionVersion,
+    waitForLiveEventsListener: live_events_1.waitForLiveEventsListener,
+    lockFilePaths: get_package_manager_1.lockFilePaths,
+    getPackageManager: get_package_manager_1.getPackageManager,
+    getMaxTimelineTracks: max_timeline_tracks_1.getMaxTimelineTracks,
+    setMaxTimelineTracks: max_timeline_tracks_1.setMaxTimelineTracks,
+    getLatestRemotionVersion: get_latest_remotion_version_1.getLatestRemotionVersion,
+    installFileWatcher: file_watcher_1.installFileWatcher,
+    AnsiDiff: ansi_diff_1.AnsiDiff,
+    formatBytes: studio_shared_1.formatBytes,
+    parseAndApplyCodemod: duplicate_composition_1.parseAndApplyCodemod,
+    openBrowser: better_opn_1.openBrowser,
+    getInstalledDependencies: get_installed_dependencies_1.getInstalledDependencies,
+    getInstallCommand: install_command_1.getInstallCommand,
+};

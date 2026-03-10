@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	ctxengine "godshell/context"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -196,10 +198,82 @@ func (c *Conversation) GetToolDefinitions() []Tool {
 					"type": "object",
 					"properties": {
 						"pid": {"type": "integer", "description": "The process ID to read from"},
-						"address": {"type": "integer", "description": "The memory address (in decimal/integer form)"},
-						"size": {"type": "integer", "description": "Number of bytes to read (default 1024)"}
+						"address_hex": {"type": "string", "description": "Memory address in hex exactly as shown in get_maps output. Example: '55bd07d14000'. Do NOT convert to decimal. Do NOT add 0x prefix."},
+						"size": {"type": "integer", "description": "Number of bytes to read. Default 1024, max 65536."}
 					},
-					"required": ["pid", "address"]
+					"required": ["pid", "address_hex"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: Function{
+				Name:        "gohash_binary",
+				Description: "Computes the SHA-256 hash of the executable associated with a process for reputation checks or integrity analysis.",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {
+						"pid": {"type": "integer", "description": "The process ID to hash its binary"}
+					},
+					"required": ["pid"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: Function{
+				Name:        "goread_shell_history",
+				Description: "Retrieves the last N lines of a user's shell history (.bash_history, .zsh_history). Critical to understand what commands a user (or attacker) typed.",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {
+						"user": {"type": "string", "description": "The username whose history you want to read"},
+						"limit": {"type": "integer", "description": "The number of recent lines to read (default 50)"}
+					},
+					"required": ["user"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: Function{
+				Name:        "gonetwork_state",
+				Description: "Extracts active network connections and their state (ESTABLISHED, LISTEN, CLOSE_WAIT) directly from /proc/pid/net/tcp and tcp6 for C2 and backdoor detection.",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {
+						"pid": {"type": "integer", "description": "The process ID to inspect network state for"}
+					},
+					"required": ["pid"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: Function{
+				Name:        "goread_environ",
+				Description: "Parses and returns the environment variables for a process from /proc/pid/environ to hunt for hardcoded credentials or tokens.",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {
+						"pid": {"type": "integer", "description": "The process ID to inspect its environment"}
+					},
+					"required": ["pid"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: Function{
+				Name:        "goextract_strings",
+				Description: "Extracts ASCII and Unicode strings from a binary file to find embedded URLs, keys, or messages.",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {
+						"path": {"type": "string", "description": "The absolute path to the file to run strings on"},
+						"min_length": {"type": "integer", "description": "The minimum length of strings to extract (default 8)"}
+					},
+					"required": ["path"]
 				}`),
 			},
 		},
@@ -277,13 +351,62 @@ func (c *Conversation) ExecuteTool(toolName string, args map[string]interface{})
 	case "read_memory":
 		pidVal := args["pid"]
 		pid, _ := pidVal.(float64)
-		addrVal := args["address"]
-		addr, _ := addrVal.(float64)
-		size := 1024.0
-		if s, ok := args["size"].(float64); ok {
-			size = s
+		addrStr, ok := args["address_hex"].(string)
+		if !ok {
+			return "", fmt.Errorf("missing or invalid address_hex argument")
 		}
-		return c.CurrentSnapshot.ReadMemory(uint32(pid), uint64(addr), int64(size)), nil
+		// Sanitize input from LLM just in case it adds 0x or whitespace
+		addrStr = strings.TrimPrefix(strings.TrimSpace(addrStr), "0x")
+		addr, err := strconv.ParseUint(addrStr, 16, 64)
+		if err != nil {
+			return "", fmt.Errorf("invalid address_hex format '%s': %v", addrStr, err)
+		}
+		size := int64(1024)
+		if s, ok := args["size"].(float64); ok {
+			size = int64(s)
+		}
+		return c.CurrentSnapshot.ReadMemory(uint32(pid), addr, size), nil
+	case "gohash_binary":
+		pidVal, ok := args["pid"]
+		if !ok {
+			return "", fmt.Errorf("missing pid argument")
+		}
+		pid, _ := pidVal.(float64)
+		return c.CurrentSnapshot.HashBinary(uint32(pid)), nil
+	case "goread_shell_history":
+		user, ok := args["user"].(string)
+		if !ok {
+			return "", fmt.Errorf("missing user argument")
+		}
+		limit := 50.0
+		if l, ok := args["limit"].(float64); ok {
+			limit = l
+		}
+		return c.CurrentSnapshot.ReadShellHistory(user, int(limit)), nil
+	case "gonetwork_state":
+		pidVal, ok := args["pid"]
+		if !ok {
+			return "", fmt.Errorf("missing pid argument")
+		}
+		pid, _ := pidVal.(float64)
+		return c.CurrentSnapshot.NetworkState(uint32(pid)), nil
+	case "goread_environ":
+		pidVal, ok := args["pid"]
+		if !ok {
+			return "", fmt.Errorf("missing pid argument")
+		}
+		pid, _ := pidVal.(float64)
+		return c.CurrentSnapshot.ReadEnviron(uint32(pid)), nil
+	case "goextract_strings":
+		path, ok := args["path"].(string)
+		if !ok {
+			return "", fmt.Errorf("missing path argument")
+		}
+		minLength := 8.0
+		if m, ok := args["min_length"].(float64); ok {
+			minLength = m
+		}
+		return c.CurrentSnapshot.ExtractStrings(path, int(minLength)), nil
 	default:
 
 		return "", fmt.Errorf("unknown tool: %s", toolName)
