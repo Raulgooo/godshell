@@ -452,7 +452,7 @@ func (fs *FrozenSnapshot) ReadProcessMaps(pid uint32) string {
 	type mapSummary struct {
 		startAddr string
 		endAddr   string
-		perms     map[rune]bool
+		permsStr  string
 		path      string
 		sizeBytes uint64
 	}
@@ -467,8 +467,6 @@ func (fs *FrozenSnapshot) ReadProcessMaps(pid uint32) string {
 			continue
 		}
 
-		// address   perms offset  dev   inode   pathname
-		// 00400000-00452000 r-xp 00000000 08:02 173521      /usr/bin/dbus-daemon
 		addrs := strings.Split(fields[0], "-")
 		if len(addrs) != 2 {
 			continue
@@ -485,32 +483,22 @@ func (fs *FrozenSnapshot) ReadProcessMaps(pid uint32) string {
 			path = strings.Join(fields[5:], " ") // handle paths with spaces
 		}
 
-		if current != nil && current.path == path {
+		// Bugfix: Only collapse if BOTH path AND permissions match.
+		// This prevents merging r-x and rw- into a fake rwx block.
+		if current != nil && current.path == path && current.permsStr == permsStr {
 			// Extend current region
 			current.endAddr = addrs[1]
 			current.sizeBytes += size
-			for _, p := range permsStr {
-				if p != '-' && p != 'p' && p != 's' { // Keep r,w,x
-					current.perms[p] = true
-				}
-			}
 		} else {
 			// Save previous and start new
 			if current != nil {
 				summaries = append(summaries, *current)
 			}
 
-			pMap := make(map[rune]bool)
-			for _, p := range permsStr {
-				if p != '-' && p != 'p' && p != 's' {
-					pMap[p] = true
-				}
-			}
-
 			current = &mapSummary{
 				startAddr: addrs[0],
 				endAddr:   addrs[1],
-				perms:     pMap,
+				permsStr:  permsStr,
 				path:      path,
 				sizeBytes: size,
 			}
@@ -526,23 +514,7 @@ func (fs *FrozenSnapshot) ReadProcessMaps(pid uint32) string {
 	b.WriteString(strings.Repeat("-", 80) + "\n")
 
 	for _, s := range summaries {
-		// Construct perm string: 'r', 'w', 'x' or '-'
-		pStr := ""
-		if s.perms['r'] {
-			pStr += "r"
-		} else {
-			pStr += "-"
-		}
-		if s.perms['w'] {
-			pStr += "w"
-		} else {
-			pStr += "-"
-		}
-		if s.perms['x'] {
-			pStr += "x"
-		} else {
-			pStr += "-"
-		}
+		pStr := s.permsStr
 
 		var sizeStr string
 		if s.sizeBytes > 1024*1024 {

@@ -20,12 +20,17 @@ To provide the LLM with "TUI-like" high-signal data (collapsed noise, grouped ap
 
 ### Methods (`context/snapshot.go` & `context/query.go`)
 
-| Method                   | Description                                                                       |
-| :----------------------- | :-------------------------------------------------------------------------------- |
-| `SummaryJSON()`          | Returns grouped applications, active processes, and recently exited ghosts.       |
-| `InspectJSON(pid)`       | Returns deep metadata for a single PID, including collapsed file/network effects. |
-| `SearchJSON(query)`      | Regex search across command names, binary paths, and effect targets (IPs/Files).  |
-| `ProcessFamilyJSON(pid)` | returns a recursive lineage tree (parent -> target -> children).                  |
+| Method                    | Description                                                                       |
+| :------------------------ | :-------------------------------------------------------------------------------- |
+| `SummaryJSON()`           | Returns grouped applications, active processes, and recently exited ghosts.       |
+| `InspectJSON(pid)`        | Returns deep metadata for a single PID, including collapsed file/network effects. |
+| `SearchJSON(query)`       | Regex search across command names, binary paths, and effect targets (IPs/Files).  |
+| `ProcessFamilyJSON(pid)`  | Returns a recursive lineage tree (parent -> target -> children).                  |
+| `ReadProcessMaps(pid)`    | Returns memory layout summary for a process.                                      |
+| `GetLinkedLibraries(pid)` | Returns shared object dependencies for a process.                                 |
+| `TraceSyscalls(pid, s)`   | Returns 5-second syscall trace for a PID.                                         |
+| `ReadFile(path, o, l)`    | Reads chunk of file from disk.                                                    |
+| `ReadMemory(pid, a, s)`   | Reads raw process memory.                                                         |
 
 ---
 
