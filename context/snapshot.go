@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"godshell/observer/browser"
 )
 
 // ── Noise filter ───────────────────────────────────────────────────────────
@@ -736,6 +738,22 @@ type SnapshotSummaryJSON struct {
 	Timestamp      time.Time      `json:"timestamp"`
 	ActiveGroups   []AppGroupJSON `json:"active_groups"`
 	RecentlyExited []GhostJSON    `json:"recently_exited,omitempty"`
+}
+
+// BrowserMapJSON returns a structured JSON map of running Chrome/Firefox processes.
+func (fs *FrozenSnapshot) BrowserMapJSON() (string, error) {
+	// Call to our new pure-go parsing package
+	// We need to import godshell/observer/browser
+	procs, err := browser.MapProcesses()
+	if err != nil {
+		return "", fmt.Errorf("failed to map browsers: %w", err)
+	}
+
+	data, err := json.MarshalIndent(procs, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 // SummaryJSON returns a structured JSON equivalent of Summary()

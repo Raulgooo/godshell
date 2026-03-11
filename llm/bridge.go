@@ -277,6 +277,17 @@ func (c *Conversation) GetToolDefinitions() []Tool {
 				}`),
 			},
 		},
+		{
+			Type: "function",
+			Function: Function{
+				Name:        "browser_map",
+				Description: "Gets an abstract tree of all running Chrome and Firefox processes. Maps PIDs to URLs (for Chrome tabs) and network roles (for Firefox) to cut through process noise and identify targets for interception.",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {}
+				}`),
+			},
+		},
 	}
 }
 
@@ -407,6 +418,12 @@ func (c *Conversation) ExecuteTool(toolName string, args map[string]interface{})
 			minLength = m
 		}
 		return c.CurrentSnapshot.ExtractStrings(path, int(minLength)), nil
+	case "browser_map":
+		// Directly maps state from the OS using pure Go; doesnt need a context snapshot directly.
+		// However, returning as JSON allows the LLM to inspect it easily.
+		// We'll call the browser package. Wait, bridge shouldn't import it directly if it's meant to be contextualized.
+		// As a quick tool, we can expose it via Snapshot or directly.
+		return c.CurrentSnapshot.BrowserMapJSON()
 	default:
 
 		return "", fmt.Errorf("unknown tool: %s", toolName)

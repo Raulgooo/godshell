@@ -516,11 +516,54 @@ func extractMeta(name string, args map[string]interface{}, result string) string
 		return metaEnviron(result, args)
 	case "goextract_strings":
 		return metaStrings(result, args)
+	case "browser_map":
+		return metaBrowserMap(result)
 	}
 	return trunc(firstNonEmptyLine(result), 60)
 }
 
 // ── Per-tool metadata extractors ───────────────────────────────────────────
+
+func metaBrowserMap(result string) string {
+	var procs []struct {
+		Browser string `json:"browser"`
+		Type    string `json:"type"`
+		URL     string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(result), &procs); err == nil {
+		chrome := 0
+		firefox := 0
+		tabs := 0
+		for _, p := range procs {
+			if p.Browser == "chrome" {
+				chrome++
+				if p.URL != "" {
+					tabs++
+				}
+			} else {
+				firefox++
+				if p.Type == "web_content" {
+					tabs++
+				}
+			}
+		}
+		parts := []string{}
+		if chrome > 0 {
+			parts = append(parts, fmt.Sprintf("%d chrome", chrome))
+		}
+		if firefox > 0 {
+			parts = append(parts, fmt.Sprintf("%d firefox", firefox))
+		}
+		if tabs > 0 {
+			parts = append(parts, toolCardHighStyle.Render(fmt.Sprintf("%d tabs", tabs)))
+		}
+		if len(parts) == 0 {
+			return "no browsers found"
+		}
+		return strings.Join(parts, " · ")
+	}
+	return "browser map generated"
+}
 
 func metaSummary(result string) string {
 	// Parse the actual SnapshotSummaryJSON
