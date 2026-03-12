@@ -16,9 +16,13 @@ const (
 
 // Config stores persistent application settings.
 type Config struct {
-	// APIKey is primarily managed via OS keyring, but can be stored in JSON
-	// as a fallback for sudo/root environments.
-	APIKey string `json:"api_key,omitempty"`
+	// APIKey is exclusively managed via OS keyring and environment variables,
+	// and never written to plain-text config files.
+	APIKey string `json:"-"`
+
+	// Threat intel keys — loaded from environment variables only, never written to disk.
+	VTApiKey   string `json:"-"` // VIRUSTOTAL_API_KEY
+	AbuseIPKey string `json:"-"` // ABUSEIPDB_API_KEY
 
 	Model                string `json:"model"`
 	Endpoint             string `json:"endpoint"`
@@ -71,23 +75,19 @@ func Load() (Config, error) {
 
 	path := ConfigPath()
 	data, err := os.ReadFile(path)
-	fileKey := ""
 	if err == nil {
-		if err := json.Unmarshal(data, &cfg); err == nil {
-			fileKey = cfg.APIKey
-		}
+		_ = json.Unmarshal(data, &cfg)
 	}
 
 	// Try keyring as the primary source
 	keyringKey := loadKeyring()
 	if keyringKey != "" {
 		cfg.APIKey = keyringKey
-		// Auto-sync: If Keyring has it but the file didn't, save it to file
-		// for future sudo access. Only do this for regular users.
-		if fileKey == "" && os.Getuid() != 0 {
-			Save(cfg)
-		}
 	}
+
+	// Threat intel keys from environment (never stored on disk)
+	cfg.VTApiKey = os.Getenv("VIRUSTOTAL_API_KEY")
+	cfg.AbuseIPKey = os.Getenv("ABUSEIPDB_API_KEY")
 
 	return cfg, nil
 }

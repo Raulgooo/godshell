@@ -4,15 +4,24 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	ctxengine "godshell/context"
-	_ "github.com/mattn/go-sqlite3"
+	"os"
+	"path/filepath"
 	"time"
+
+	ctxengine "godshell/context"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 var db *sql.DB
 
 // Init initializes the SQLite database at the specified path.
 func Init(dbPath string) error {
+	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("failed to create db directory: %w", err)
+	}
+
 	var err error
 	db, err = sql.Open("sqlite3", dbPath)
 	if err != nil {

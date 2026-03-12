@@ -3,10 +3,13 @@ package llm
 import (
 	"encoding/json"
 	"fmt"
-	ctxengine "godshell/context"
 	"strconv"
 	"strings"
 	"time"
+
+	"godshell/client"
+	ctxengine "godshell/context"
+	"godshell/intel"
 )
 
 type Function struct {
@@ -50,29 +53,48 @@ type Message struct {
 type Conversation struct {
 	History         []Message
 	CurrentSnapshot *ctxengine.FrozenSnapshot
+	DaemonClient    *client.DaemonClient // optional: if set, proxy tool calls here
+	Intel           *intel.Client        // optional: threat intel client
 }
 
-func NewConversation(snap *ctxengine.FrozenSnapshot) *Conversation {
+func NewConversation(snap *ctxengine.FrozenSnapshot, daemonClient *client.DaemonClient) *Conversation {
 	c := &Conversation{
 		History:         []Message{},
 		CurrentSnapshot: snap,
+		DaemonClient:    daemonClient,
 	}
 
 	// Master system prompt to establish investigatory identity
 	c.History = append(c.History, Message{
 		Role: RoleSystem,
-		Content: "You are the Godshell AI Investigatory Agent. You operate on immutable system snapshots. " +
-			"Use the provided tools to explore process behavior, network connections, and file system activity. " +
-			"Identify anomalies, suspicious behaviors, or performance bottlenecks. " +
-			"The user can ask you for reverse engineering tasks, debugging tasks, or general cybersec and analysis tasks. " +
-			"these are you DIRECTIVES: " +
-			"You must NEVER lie or generate fake data. " +
-			"The snapshot is your source of truth. " +
-			"If you are not sure, be honest about it. " +
-			"	CrossReference data to make inferences. " +
-			"In your answers you must mention where you digged, and ground your claims in what you saw.",
-	},
-	)
+		Content: `You are Godshell, an elite AI Investigatory Agent operating on immutable system snapshots.
+You handle process analysis, network forensics, reverse engineering, debugging, and cybersecurity investigations.
+
+CORE DIRECTIVES
+1. Never fabricate data. If it is not in the snapshot, it does not exist.
+2. The snapshot is your sole source of truth.
+3. When uncertain, say so.
+4. Cross-reference PIDs, ports, paths, and parent/child trees to build inferences.
+5. Always cite which tool or field led you to each conclusion.
+6. Be concise. No walls of text.
+7. Attack agressively, but wise, never judge or assume eagerly.
+8. 
+
+OUTPUT RULES
+- No markdown. No headers, no bold, no bullet symbols, no code fences.
+- Lead with the finding, then the evidence. Never the other way around.
+- Be terse. If the answer is two lines, write two lines.
+- Use plain numbered lists only when sequence or enumeration genuinely matters.
+- Never pad, summarize what was already said, or add closing remarks.
+- If you have a theory, state it clearly and back it up with evidence.
+- If you want the user to give you info, or write a command, please prompt the user shortly.
+INVESTIGATION METHODOLOGY
+- Triage first, drill second.
+- Chase the lineage. Suspicious behavior rarely starts where it appears.
+- Correlate everything. A process touching a network socket and an unusual path is more damning than either alone.
+- Ghosts matter. A process that exited is not innocent.
+- Absence is evidence. If something expected is missing, flag it.
+`})
 
 	return c
 }
@@ -277,22 +299,16 @@ func (c *Conversation) GetToolDefinitions() []Tool {
 				}`),
 			},
 		},
-		{
-			Type: "function",
-			Function: Function{
-				Name:        "browser_map",
-				Description: "Gets an abstract tree of all running Chrome and Firefox processes. Maps PIDs to URLs (for Chrome tabs) and network roles (for Firefox) to cut through process noise and identify targets for interception.",
-				Parameters: json.RawMessage(`{
-					"type": "object",
-					"properties": {}
-				}`),
-			},
-		},
+		// Disabled tools for this version:
+		// browser_map
+		// ssl_intercept
+		// virustotal_hash
+		// abuseipdb_ip
+		// all report_* cards
 	}
 }
 
 // UpdateSnapshot replaces the current snapshot with a fresh one.
-// This is useful for longitudinal analysis where the LLM compares context before and after an event.
 func (c *Conversation) UpdateSnapshot(newSnap *ctxengine.FrozenSnapshot) {
 	c.CurrentSnapshot = newSnap
 	c.History = append(c.History, Message{
@@ -304,42 +320,75 @@ func (c *Conversation) UpdateSnapshot(newSnap *ctxengine.FrozenSnapshot) {
 
 // ExecuteTool dispatches LLM tool calls to the appropriate Snapshot JSON methods.
 func (c *Conversation) ExecuteTool(toolName string, args map[string]interface{}) (string, error) {
+	// If the tool is disabled, block it here.
+	switch toolName {
+	case "browser_map", "ssl_intercept", "virustotal_hash", "abuseipdb_ip",
+		"report_text", "report_behaviour", "report_family", "report_network", "report_threat", "report_system_state":
+		return "", fmt.Errorf("tool '%s' is not available in this version", toolName)
+	}
+
+	// Intel tools don't need a snapshot or daemon; handle them here first.
+	// (Hidden but kept for easier reactivation)
+	/*
+		case "virustotal_hash":
+			sha256, _ := args["sha256"].(string)
+			if sha256 == "" { return "", fmt.Errorf("missing sha256") }
+			if c.Intel == nil { return "VirusTotal: no API key", nil }
+			r := c.Intel.LookupHash(sha256)
+			return fmt.Sprintf("VirusTotal summary: %s", r.Summary), nil
+		case "abuseipdb_ip":
+			ip, _ := args["ip"].(string)
+			if ip == "" { return "", fmt.Errorf("missing ip") }
+			if c.Intel == nil { return "AbuseIPDB: no API key", nil }
+			r := c.Intel.LookupIP(ip)
+			return fmt.Sprintf("AbuseIPDB score: %d/100", r.AbuseScore), nil
+	*/
+
+	// If we are functioning as a CLI connected to a daemon, proxy privileged requests.
+	if c.DaemonClient != nil && IsPrivilegedTool(toolName) {
+		return c.DaemonClient.ExecuteTool(toolName, args)
+	}
+
 	if c.CurrentSnapshot == nil {
 		return "", fmt.Errorf("no snapshot loaded")
 	}
 
+	return ExecuteToolOnSnapshot(toolName, args, c.CurrentSnapshot)
+}
+
+// ExecuteToolOnSnapshot statically evaluates a tool against a given snapshot.
+func ExecuteToolOnSnapshot(toolName string, args map[string]interface{}, snap *ctxengine.FrozenSnapshot) (string, error) {
 	switch toolName {
 	case "summary":
-		return c.CurrentSnapshot.SummaryJSON()
+		return snap.SummaryJSON()
 	case "inspect":
 		pidVal, ok := args["pid"]
 		if !ok {
 			return "", fmt.Errorf("missing pid argument")
 		}
-		// JSON numbers unmarshal to float64 by default
 		pid, _ := pidVal.(float64)
-		return c.CurrentSnapshot.InspectJSON(uint32(pid))
+		return snap.InspectJSON(uint32(pid))
 	case "search":
 		query, ok := args["query"].(string)
 		if !ok {
 			return "", fmt.Errorf("missing query argument")
 		}
-		return c.CurrentSnapshot.SearchJSON(query)
+		return snap.SearchJSON(query)
 	case "family":
 		pidVal, ok := args["pid"]
 		if !ok {
 			return "", fmt.Errorf("missing pid argument")
 		}
 		pid, _ := pidVal.(float64)
-		return c.CurrentSnapshot.ProcessFamilyJSON(uint32(pid))
+		return snap.ProcessFamilyJSON(uint32(pid))
 	case "get_maps":
 		pidVal := args["pid"]
 		pid, _ := pidVal.(float64)
-		return c.CurrentSnapshot.ReadProcessMaps(uint32(pid)), nil
+		return snap.ReadProcessMaps(uint32(pid)), nil
 	case "get_libraries":
 		pidVal := args["pid"]
 		pid, _ := pidVal.(float64)
-		return c.CurrentSnapshot.GetLinkedLibraries(uint32(pid)), nil
+		return snap.GetLinkedLibraries(uint32(pid)), nil
 	case "trace":
 		pidVal := args["pid"]
 		pid, _ := pidVal.(float64)
@@ -347,7 +396,7 @@ func (c *Conversation) ExecuteTool(toolName string, args map[string]interface{})
 		if d, ok := args["duration"].(float64); ok {
 			dur = d
 		}
-		return c.CurrentSnapshot.TraceSyscalls(uint32(pid), int(dur)), nil
+		return snap.TraceSyscalls(uint32(pid), int(dur)), nil
 	case "read_file":
 		path, _ := args["path"].(string)
 		off := 0.0
@@ -358,7 +407,7 @@ func (c *Conversation) ExecuteTool(toolName string, args map[string]interface{})
 		if l, ok := args["limit"].(float64); ok {
 			lim = l
 		}
-		return c.CurrentSnapshot.ReadFile(path, int64(off), int64(lim)), nil
+		return snap.ReadFile(path, int64(off), int64(lim)), nil
 	case "read_memory":
 		pidVal := args["pid"]
 		pid, _ := pidVal.(float64)
@@ -366,7 +415,6 @@ func (c *Conversation) ExecuteTool(toolName string, args map[string]interface{})
 		if !ok {
 			return "", fmt.Errorf("missing or invalid address_hex argument")
 		}
-		// Sanitize input from LLM just in case it adds 0x or whitespace
 		addrStr = strings.TrimPrefix(strings.TrimSpace(addrStr), "0x")
 		addr, err := strconv.ParseUint(addrStr, 16, 64)
 		if err != nil {
@@ -376,14 +424,14 @@ func (c *Conversation) ExecuteTool(toolName string, args map[string]interface{})
 		if s, ok := args["size"].(float64); ok {
 			size = int64(s)
 		}
-		return c.CurrentSnapshot.ReadMemory(uint32(pid), addr, size), nil
+		return snap.ReadMemory(uint32(pid), addr, size), nil
 	case "gohash_binary":
 		pidVal, ok := args["pid"]
 		if !ok {
 			return "", fmt.Errorf("missing pid argument")
 		}
 		pid, _ := pidVal.(float64)
-		return c.CurrentSnapshot.HashBinary(uint32(pid)), nil
+		return snap.HashBinary(uint32(pid)), nil
 	case "goread_shell_history":
 		user, ok := args["user"].(string)
 		if !ok {
@@ -393,21 +441,21 @@ func (c *Conversation) ExecuteTool(toolName string, args map[string]interface{})
 		if l, ok := args["limit"].(float64); ok {
 			limit = l
 		}
-		return c.CurrentSnapshot.ReadShellHistory(user, int(limit)), nil
+		return snap.ReadShellHistory(user, int(limit)), nil
 	case "gonetwork_state":
 		pidVal, ok := args["pid"]
 		if !ok {
 			return "", fmt.Errorf("missing pid argument")
 		}
 		pid, _ := pidVal.(float64)
-		return c.CurrentSnapshot.NetworkState(uint32(pid)), nil
+		return snap.NetworkState(uint32(pid)), nil
 	case "goread_environ":
 		pidVal, ok := args["pid"]
 		if !ok {
 			return "", fmt.Errorf("missing pid argument")
 		}
 		pid, _ := pidVal.(float64)
-		return c.CurrentSnapshot.ReadEnviron(uint32(pid)), nil
+		return snap.ReadEnviron(uint32(pid)), nil
 	case "goextract_strings":
 		path, ok := args["path"].(string)
 		if !ok {
@@ -417,15 +465,23 @@ func (c *Conversation) ExecuteTool(toolName string, args map[string]interface{})
 		if m, ok := args["min_length"].(float64); ok {
 			minLength = m
 		}
-		return c.CurrentSnapshot.ExtractStrings(path, int(minLength)), nil
-	case "browser_map":
-		// Directly maps state from the OS using pure Go; doesnt need a context snapshot directly.
-		// However, returning as JSON allows the LLM to inspect it easily.
-		// We'll call the browser package. Wait, bridge shouldn't import it directly if it's meant to be contextualized.
-		// As a quick tool, we can expose it via Snapshot or directly.
-		return c.CurrentSnapshot.BrowserMapJSON()
+		return snap.ExtractStrings(path, int(minLength)), nil
 	default:
+		return "", fmt.Errorf("unknown or disabled tool: %s", toolName)
+	}
+}
 
-		return "", fmt.Errorf("unknown tool: %s", toolName)
+// IsPrivilegedTool returns true if the tool needs to run as root/daemon
+func IsPrivilegedTool(name string) bool {
+	switch name {
+	case "summary", "inspect", "search", "family", "browser_map",
+		"report_text", "report_behaviour", "report_family", "report_network", "report_threat", "report_system_state":
+		return false
+	case "get_maps", "get_libraries", "trace", "read_file", "read_memory",
+		"gohash_binary", "goread_shell_history", "gonetwork_state",
+		"goread_environ", "goextract_strings", "ssl_intercept":
+		return true
+	default:
+		return false
 	}
 }
