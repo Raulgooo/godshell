@@ -36,7 +36,7 @@ nfpms:
     contents:
       - src: ./packaging/godshell.service
         dst: /etc/systemd/system/godshell.service
-      - src: ./godshell
+      - src: godshell
         dst: /usr/bin/godshell
 
     scripts:
