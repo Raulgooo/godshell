@@ -1,6 +1,0 @@
-import type { LocalState } from './local-state';
-import type { JSONPath } from './zod-types';
-export declare const ZodFieldValidation: React.FC<{
-    localValue: LocalState<unknown>;
-    path: JSONPath;
-}>;

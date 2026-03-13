@@ -134,3 +134,16 @@ func PruneSnapshots(hours int) (int64, error) {
 
 	return res.RowsAffected()
 }
+
+// DeleteSnapshot physically removes a snapshot from the database by ID.
+func DeleteSnapshot(id int64) error {
+	if db == nil {
+		return fmt.Errorf("database not initialized")
+	}
+
+	_, err := db.Exec("DELETE FROM snapshots WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("failed to delete snapshot %d: %w", id, err)
+	}
+	return nil
+}

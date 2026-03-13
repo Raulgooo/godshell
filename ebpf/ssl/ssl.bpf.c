@@ -21,10 +21,9 @@
 #include <bpf/bpf_tracing.h>
 
 /*
- * x86_64 pt_regs struct for uprobe programs.
- * bpf_tracing.h forward-declares 'struct pt_regs' but leaves it incomplete.
- * We provide the full definition here.
+ * Architecture-specific pt_regs structs for uprobe programs.
  */
+#if defined(__TARGET_ARCH_x86)
 #ifndef __ARCH_X86_64_PT_REGS_DEFINED
 #define __ARCH_X86_64_PT_REGS_DEFINED
 struct pt_regs {
@@ -33,6 +32,20 @@ struct pt_regs {
   unsigned long rax, rcx, rdx, rsi, rdi;
   unsigned long orig_rax, rip, cs, eflags, rsp, ss;
 };
+#endif
+#elif defined(__TARGET_ARCH_arm64)
+#ifndef __ARCH_ARM64_PT_REGS_DEFINED
+#define __ARCH_ARM64_PT_REGS_DEFINED
+struct user_pt_regs {
+  __u64 regs[31];
+  __u64 sp;
+  __u64 pc;
+  __u64 pstate;
+};
+struct pt_regs {
+  struct user_pt_regs user_regs;
+};
+#endif
 #endif
 
 char __license[] SEC("license") = "Dual MIT/GPL";

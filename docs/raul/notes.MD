@@ -1,1 +1,1 @@
-- Change to AGPL
+- :D

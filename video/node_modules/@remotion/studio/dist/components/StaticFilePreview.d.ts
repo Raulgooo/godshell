@@ -1,5 +1,0 @@
-import type { AssetMetadata } from '../helpers/get-asset-metadata';
-export declare const StaticFilePreview: React.FC<{
-    currentAsset: string;
-    assetMetadata: AssetMetadata | null;
-}>;

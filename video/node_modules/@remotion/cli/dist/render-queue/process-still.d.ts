@@ -1,8 +1,0 @@
-import type { JobProgressCallback, RenderJob } from '@remotion/studio-server';
-export declare const processStill: ({ job, remotionRoot, entryPoint, onProgress, addCleanupCallback, }: {
-    job: RenderJob;
-    remotionRoot: string;
-    entryPoint: string;
-    onProgress: JobProgressCallback;
-    addCleanupCallback: (label: string, cb: () => void) => void;
-}) => Promise<void>;

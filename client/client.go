@@ -159,3 +159,25 @@ func (c *DaemonClient) ListSnapshots() ([]store.SnapshotMeta, error) {
 
 	return metas, nil
 }
+
+// DeleteSnapshot proxies deleting a snapshot from the daemon's DB.
+func (c *DaemonClient) DeleteSnapshot(id int64) error {
+	url := fmt.Sprintf("http://localhost/api/db/delete?id=%d", id)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create delete request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("daemon delete failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("daemon delete error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}

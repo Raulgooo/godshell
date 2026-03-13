@@ -1,6 +1,8 @@
 // Package ssl provides a Go-side observer that attaches eBPF uprobes to
 // libssl.so (OpenSSL), libnss3.so (Firefox NSS), and Go crypto/tls binaries,
 // then streams plaintext SSL events for HTTP reconstruction.
+//
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target amd64,arm64 ssl ../../ebpf/ssl/ssl.bpf.c -- -I../../ebpf
 package ssl
 
 import (
@@ -23,8 +25,7 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
-//go:embed ssl_bpfel.o
-var sslBPFBytes []byte
+// ssl.go no longer manually embeds; it uses loadSsl() from generated files.
 
 // DirWrite / DirRead match ssl.bpf.c constants.
 const (
@@ -69,7 +70,7 @@ func New() (*Observer, error) {
 		return nil, fmt.Errorf("RemoveMemlock: %w", err)
 	}
 
-	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(sslBPFBytes))
+	spec, err := loadSsl()
 	if err != nil {
 		return nil, fmt.Errorf("load ssl bpf spec: %w", err)
 	}

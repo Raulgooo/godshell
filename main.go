@@ -92,6 +92,10 @@ type snapshotsListedMsg struct {
 	metas []store.SnapshotMeta
 	err   error
 }
+type snapshotDeletedMsg struct {
+	id  int64
+	err error
+}
 
 // ── View mode ──────────────────────────────────────────────────────────────
 
@@ -309,11 +313,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case snapshotsListedMsg:
 		if msg.err != nil {
-			m.statusMsg = errorStyle.Render("list: " + msg.err.Error())
-			return m, nil
+			m.statusMsg = errorStyle.Render(fmt.Sprintf("✕ loader: %v", msg.err))
+		} else {
+			m.snapMetas = msg.metas
+			m.snapTable = buildSnapshotTable(m.snapMetas)
 		}
-		m.snapMetas = msg.metas
-		m.snapTable = buildSnapshotTable(msg.metas)
+	case snapshotDeletedMsg:
+		if msg.err != nil {
+			m.statusMsg = errorStyle.Render(fmt.Sprintf("✕ delete: %v", msg.err))
+		} else {
+			m.statusMsg = okStyle.Render(fmt.Sprintf("✓ deleted snapshot %d", msg.id))
+			// Refresh the list automatically
+			return m, func() tea.Msg {
+				var metas []store.SnapshotMeta
+				var err error
+				if m.conv.DaemonClient != nil {
+					metas, err = m.conv.DaemonClient.ListSnapshots()
+				} else {
+					metas, err = store.ListSnapshots()
+				}
+				return snapshotsListedMsg{metas: metas, err: err}
+			}
+		}
 		m.mode = modeLoader
 		m.textInput.Blur()
 		return m, nil
@@ -610,12 +631,12 @@ func (m model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateLoader(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEscape:
+	switch msg.String() {
+	case "esc":
 		m.mode = modeChat
 		m.textInput.Focus()
 		return m, nil
-	case tea.KeyEnter:
+	case "enter":
 		row := m.snapTable.Cursor()
 		if row >= 0 && row < len(m.snapMetas) {
 			meta := m.snapMetas[row]
@@ -630,7 +651,21 @@ func (m model) updateLoader(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return snapshotLoadedMsg{snap: snap, err: err}
 			}
 		}
-	case tea.KeyCtrlC:
+	case "x", "d":
+		row := m.snapTable.Cursor()
+		if row >= 0 && row < len(m.snapMetas) {
+			id := m.snapMetas[row].ID
+			return m, func() tea.Msg {
+				var err error
+				if m.conv.DaemonClient != nil {
+					err = m.conv.DaemonClient.DeleteSnapshot(id)
+				} else {
+					err = store.DeleteSnapshot(id)
+				}
+				return snapshotDeletedMsg{id: id, err: err}
+			}
+		}
+	case "ctrl+c":
 		return m, tea.Quit
 	}
 	t, cmd := m.snapTable.Update(msg)
@@ -798,7 +833,7 @@ func (m model) viewLoader() string {
 	} else {
 		b.WriteString(m.snapTable.View() + "\n")
 	}
-	b.WriteString("\n" + statusStyle.Render("↑↓ navigate  enter load  esc back") + "\n")
+	b.WriteString("\n" + statusStyle.Render("↑↓ navigate  enter load  [x] delete  esc back") + "\n")
 	return b.String()
 }
 

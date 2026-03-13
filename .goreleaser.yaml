@@ -1,0 +1,61 @@
+# .goreleaser.yaml
+project_name: godshell
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - id: godshell
+    binary: godshell
+    main: main.go
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=1
+
+nfpms:
+  - id: godshell-packaging
+    package_name: godshell
+    maintainer: Raúl González <[EMAIL_ADDRESS]>
+    description: High-performance process observation shell with LLM analysis using eBPF.
+    license: MIT
+    formats:
+      - deb
+      - rpm
+      - archlinux
+      - apk
+
+    contents:
+      - src: ./packaging/godshell.service
+        dst: /etc/systemd/system/godshell.service
+      - src: ./godshell
+        dst: /usr/bin/godshell
+
+    scripts:
+      postinstall: ./packaging/postinstall.sh
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  name_template: "{{ .Tag }}-next"
+
+release:
+  github:
+    owner: tu-usuario
+    name: godshell

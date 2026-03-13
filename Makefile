@@ -13,7 +13,7 @@ ebpf:
 	@$(GO) generate ./...
 
 .PHONY: build
-build:
+build: ebpf
 	@echo "Building godshell..."
 	@$(GO) build -o $(BINARY) main.go
 
@@ -26,8 +26,8 @@ test:
 clean:
 	@echo "Cleaning build artifacts..."
 	@rm -f $(BINARY)
-	@rm -f observer/bpf_bpfeb.go observer/bpf_bpfeb.o
-	@rm -f observer/bpf_bpfel.go observer/bpf_bpfel.o
+	@rm -f observer/*_bpfel.go observer/*_bpfeb.go observer/*_bpfel.o observer/*_bpfeb.o
+	@rm -f observer/ssl/*_bpfel.go observer/ssl/*_bpfeb.go observer/ssl/*_bpfel.o observer/ssl/*_bpfeb.o
 	@rm -f godshell_* test_heap_bin
 	@find . -name "*.o" -delete
 

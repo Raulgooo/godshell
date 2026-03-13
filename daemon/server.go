@@ -49,6 +49,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/db/save", s.handleDBSave)
 	mux.HandleFunc("/api/db/load", s.handleDBLoad)
 	mux.HandleFunc("/api/db/list", s.handleDBList)
+	mux.HandleFunc("/api/db/delete", s.handleDBDelete)
 
 	fmt.Printf("Daemon listening on %s\n", s.SocketPath)
 	return http.Serve(listener, mux)
@@ -175,4 +176,26 @@ func (s *Server) handleDBList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to encode snapshot list: %v", err), http.StatusInternalServerError)
 		return
 	}
+}
+
+func (s *Server) handleDBDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	idStr := r.URL.Query().Get("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid ID parameter", http.StatusBadRequest)
+		return
+	}
+
+	if err := store.DeleteSnapshot(id); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to delete snapshot: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "OK")
 }

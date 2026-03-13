@@ -1,7 +1,0 @@
-import { type EnumPath } from '@remotion/studio-shared';
-export declare const updateDefaultProps: ({ input, compositionId, newDefaultProps, enumPaths, }: {
-    input: string;
-    compositionId: string;
-    newDefaultProps: Record<string, unknown>;
-    enumPaths: EnumPath[];
-}) => Promise<Promise<Promise<Promise<string>>>>;

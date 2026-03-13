@@ -1,4 +1,0 @@
-export declare const InlineEyeButton: React.FC<{
-    onClick: () => void;
-    enabled: boolean;
-}>;

@@ -1,2 +1,0 @@
-import React from 'react';
-export declare const flattenChildren: (children: React.ReactNode) => (string | number | bigint | Iterable<React.ReactNode> | Promise<string | number | bigint | boolean | Iterable<React.ReactNode> | React.ReactElement<unknown, string | React.JSXElementConstructor<any>> | React.ReactPortal | null | undefined> | React.ReactElement<unknown, string | React.JSXElementConstructor<any>> | React.ReactPortal)[];

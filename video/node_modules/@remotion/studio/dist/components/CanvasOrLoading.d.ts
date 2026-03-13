@@ -1,5 +1,0 @@
-import type { Size } from '@remotion/player';
-import React from 'react';
-export declare const CanvasOrLoading: React.FC<{
-    readonly size: Size;
-}>;

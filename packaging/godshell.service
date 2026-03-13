@@ -1,0 +1,13 @@
+[Unit]
+Description=Godshell Observation Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/godshell daemon
+Restart=always
+User=root
+WorkingDirectory=/var/lib/godshell
+
+[Install]
+WantedBy=multi-user.target

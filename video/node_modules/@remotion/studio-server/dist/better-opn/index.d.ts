@@ -1,5 +1,0 @@
-export declare const openBrowser: ({ url, browserFlag, browserArgs, }: {
-    url: string;
-    browserFlag: string | undefined;
-    browserArgs: string | undefined;
-}) => Promise<boolean | import("child_process").ChildProcess>;

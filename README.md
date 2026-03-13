@@ -1,6 +1,10 @@
 # 👻 Godshell
 
-**A shell that knows what is happening on your system before you ask.**
+![Godshell Demo](demo.gif)
+
+- A new way to interact with your kernel
+
+**godshell.**
 
 Most LLM-native terminals are "probing-first": they run `top`, `ps`, and `ls` every time you ask a question. **Godshell** is "observation-first". It uses eBPF to watch your kernel's internal events since the moment it started.
 

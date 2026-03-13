@@ -1,8 +1,0 @@
-type State = {
-    editorZoomGestures: boolean;
-    setEditorZoomGestures: (cb: (prevState: boolean) => boolean) => void;
-};
-export declare const persistEditorZoomGesturesOption: (option: boolean) => void;
-export declare const loadEditorZoomGesturesOption: () => boolean;
-export declare const EditorZoomGesturesContext: import("react").Context<State>;
-export {};

@@ -1,4 +1,0 @@
-import type { ReadStream } from 'node:fs';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-export declare function setHeaderForResponse(res: ServerResponse, name: string, value: string | number): void;
-export declare function send(req: IncomingMessage, res: ServerResponse, bufferOtStream: ReadStream | string | Buffer, byteLength: number): void;

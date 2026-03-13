@@ -1,6 +1,0 @@
-type TimelineWidthContextType = number | null;
-export declare const TimelineWidthContext: import("react").Context<TimelineWidthContextType>;
-export declare const TimelineWidthProvider: React.FC<{
-    children: React.ReactNode;
-}>;
-export {};

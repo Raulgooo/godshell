@@ -1,4 +1,0 @@
-import type { Bug } from './UpdateCheck';
-export declare const KnownBugs: React.FC<{
-    bugs: Bug[];
-}>;
