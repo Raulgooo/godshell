@@ -37,7 +37,12 @@ struct event {
   __u8 type;
   char comm[16];
   char path[256];
-};
+  /* Socket metadata */
+  __u16 family;
+  __u16 port;
+  __u32 ipv4_remote;
+  __u8 ipv6_remote[16];
+} __attribute__((packed));
 
 /* ── Maps ───────────────────────────────────────────────────────────────── */
 
@@ -192,6 +197,24 @@ int trace_connect(struct sys_enter_ctx *ctx) {
   e->pid = pid;
   e->uid = (__u32)bpf_get_current_uid_gid();
   bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+  /* args[1] = struct sockaddr *addr */
+  struct sockaddr addr = {};
+  if (bpf_probe_read_user(&addr, sizeof(addr), (void *)ctx->args[1]) == 0) {
+    e->family = addr.sa_family;
+    if (addr.sa_family == 2) { // AF_INET
+      struct sockaddr_in addr4 = {};
+      bpf_probe_read_user(&addr4, sizeof(addr4), (void *)ctx->args[1]);
+      e->port = bpf_ntohs(addr4.sin_port);
+      e->ipv4_remote = addr4.sin_addr.s_addr;
+    } else if (addr.sa_family == 10) { // AF_INET6
+      struct sockaddr_in6 addr6 = {};
+      bpf_probe_read_user(&addr6, sizeof(addr6), (void *)ctx->args[1]);
+      e->port = bpf_ntohs(addr6.sin6_port);
+      bpf_probe_read_user(&e->ipv6_remote, sizeof(e->ipv6_remote),
+                          &addr6.sin6_addr);
+    }
+  }
 
   bpf_ringbuf_submit(e, 0);
   return 0;

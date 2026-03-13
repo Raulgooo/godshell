@@ -147,15 +147,15 @@ type semanticRule struct {
 	kind    EffectKind
 }
 
-var semanticRules = []semanticRule{
-	{regexp.MustCompile(`/proc/.*/stat$`), "process monitoring", EffectOpen},
-	{regexp.MustCompile(`/proc/.*/status$`), "process monitoring", EffectOpen},
-	{regexp.MustCompile(`/proc/.*/cmdline`), "process monitoring", EffectOpen},
-	{regexp.MustCompile(`/proc/stat$`), "system CPU stats", EffectOpen},
-	{regexp.MustCompile(`/proc/meminfo`), "memory monitoring", EffectOpen},
-	{regexp.MustCompile(`/proc/cpuinfo`), "CPU info polling", EffectOpen},
-	{regexp.MustCompile(`/sys/devices/system/cpu/.*/cpufreq`), "CPU frequency polling", EffectOpen},
-	{regexp.MustCompile(`/sys/class/power_supply`), "battery monitoring", EffectOpen},
+var basicSemanticRules = []semanticRule{
+	{regexp.MustCompile(`/.*/stat$`), "process monitoring", EffectOpen},
+	{regexp.MustCompile(`/.*/status$`), "process monitoring", EffectOpen},
+	{regexp.MustCompile(`/.*/cmdline`), "process monitoring", EffectOpen},
+	{regexp.MustCompile(`/stat$`), "system CPU stats", EffectOpen},
+	{regexp.MustCompile(`/meminfo`), "memory monitoring", EffectOpen},
+	{regexp.MustCompile(`/cpuinfo`), "CPU info polling", EffectOpen},
+	{regexp.MustCompile(`/devices/system/cpu/.*/cpufreq`), "CPU frequency polling", EffectOpen},
+	{regexp.MustCompile(`/class/power_supply`), "battery monitoring", EffectOpen},
 	{regexp.MustCompile(`/dev/shm/\.org\.chromium`), "Chromium shared memory IPC", EffectOpen},
 	{regexp.MustCompile(`/dev/shm/\.com\.google\.Chrome`), "Chrome shared memory IPC", EffectOpen},
 	{regexp.MustCompile(`\.indexeddb\.`), "IndexedDB storage", EffectOpen},
@@ -166,7 +166,7 @@ var semanticRules = []semanticRule{
 }
 
 func semanticLabel(path string, kind EffectKind) string {
-	for _, rule := range semanticRules {
+	for _, rule := range basicSemanticRules {
 		if rule.kind == kind && rule.pattern.MatchString(path) {
 			return rule.label
 		}
@@ -234,8 +234,8 @@ func processLine(p *ProcessNode, t *ProcessTree, effects []collapsed, grouped bo
 			parentName = "init"
 		} else {
 			// Fallback: the parent exists but we didn't catch its exec (e.g., it started before godshell)
-			// Read /proc/<ppid>/stat to get its name
-			statPath := fmt.Sprintf("/proc/%d/stat", p.PPID)
+			// Read <proc>/<ppid>/stat to get its name
+			statPath := fmt.Sprintf("%s/%d/stat", t.ProcPath, p.PPID)
 			if data, err := os.ReadFile(statPath); err == nil {
 				// /proc/[pid]/stat format starts with: ppid (comm) state ...
 				// Extract the part between the first '(' and the last ')'
@@ -286,7 +286,9 @@ func processLineFrozen(p *ProcessNode, t *FrozenSnapshot, effects []collapsed, g
 		} else if p.PPID == 1 {
 			parentName = "init"
 		} else {
-			statPath := fmt.Sprintf("/proc/%d/stat", p.PPID)
+			statPath := fmt.Sprintf("%s/%d/stat", "/proc", p.PPID) // Frozen snapshot doesn't have t.ProcPath
+			// For frozen snapshots, we might not have the original ProcPath stored.
+			// Let's just use /proc as a fallback for now, or we should have stored it.
 			if data, err := os.ReadFile(statPath); err == nil {
 				start := strings.IndexByte(string(data), '(')
 				end := strings.LastIndexByte(string(data), ')')
@@ -738,6 +740,43 @@ type SnapshotSummaryJSON struct {
 	Timestamp      time.Time      `json:"timestamp"`
 	ActiveGroups   []AppGroupJSON `json:"active_groups"`
 	RecentlyExited []GhostJSON    `json:"recently_exited,omitempty"`
+}
+
+// Memory Region metadata
+type RegionSummary struct {
+	StartAddr uint64 `json:"start"`
+	EndAddr   uint64 `json:"end"`
+	Size      int64  `json:"size"`
+	Perms     string `json:"perms"`
+	Label     string `json:"label"`
+}
+
+// A single sensitive finding
+type Finding struct {
+	Kind    string `json:"kind"` // IP_ADDR, URL, POTENT_KEY, SENS_PATH
+	Value   string `json:"value"`
+	Address uint64 `json:"address"`
+	Region  string `json:"region"`
+	Score   int    `json:"score"`
+}
+
+// Statistics for a scan operation
+type ScanStats struct {
+	RegionsScanned int   `json:"regions_scanned"`
+	BytesRead      int64 `json:"bytes_read"`
+	FindingsTotal  int   `json:"findings_total"`
+	Truncated      bool  `json:"truncated"`
+	ReadErrors     int   `json:"read_errors"`
+}
+
+// Top-level structured result for LLM consumption
+type HeapScanResult struct {
+	PID      uint32          `json:"pid"`
+	Comm     string          `json:"comm"`
+	Error    string          `json:"error,omitempty"`
+	Regions  []RegionSummary `json:"regions"`
+	Findings []Finding       `json:"findings"`
+	Stats    ScanStats       `json:"stats"`
 }
 
 // BrowserMapJSON returns a structured JSON map of running Chrome/Firefox processes.

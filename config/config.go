@@ -24,22 +24,46 @@ type Config struct {
 	VTApiKey   string `json:"-"` // VIRUSTOTAL_API_KEY
 	AbuseIPKey string `json:"-"` // ABUSEIPDB_API_KEY
 
-	Model                string `json:"model"`
-	Endpoint             string `json:"endpoint"`
-	SnapshotIntervalSec  int    `json:"snapshot_interval_sec"`
-	SnapshotRetentionSec int    `json:"snapshot_retention_sec"`
-	SnapshotConcurrency  int    `json:"snapshot_concurrency"`
-	DBPath               string `json:"db_path"`
+	Model                    string `json:"model"`
+	Endpoint                 string `json:"endpoint"`
+	SnapshotIntervalMin      int    `json:"snapshot_interval_min"`
+	GhostProcessRetentionSec int    `json:"ghost_process_retention_sec"`
+	DBSnapshotRetentionHours int    `json:"db_snapshot_retention_hours"`
+	SnapshotConcurrency      int    `json:"snapshot_concurrency"`
+	DBPath                   string `json:"db_path"`
+	SocketPath               string `json:"socket_path"`
+	ProcPath                 string `json:"proc_path"`
+	SysPath                  string `json:"sys_path"`
+
+	// Engine Limits
+	EnrichmentWorkers    int `json:"enrichment_workers"`
+	MaxEffectsPerProcess int `json:"max_effects_per_process"`
+
+	// Forensic Toggles
+	CaptureNetwork bool `json:"capture_network"`
+	CaptureFileIO  bool `json:"capture_file_io"`
+
+	// Noise Filtering
+	IgnoredProcesses []string `json:"ignored_processes"`
 }
 
 func Default() Config {
 	return Config{
-		Model:                "google/gemini-2.5-flash-preview",
-		Endpoint:             "https://openrouter.ai/api/v1/chat/completions",
-		SnapshotIntervalSec:  0,
-		SnapshotRetentionSec: 60,
-		SnapshotConcurrency:  1,
-		DBPath:               filepath.Join(configDir(), "godshell.db"),
+		Model:                    "google/gemini-2.5-flash-preview",
+		Endpoint:                 "https://openrouter.ai/api/v1/chat/completions",
+		SnapshotIntervalMin:      0,
+		GhostProcessRetentionSec: 60,
+		DBSnapshotRetentionHours: 24,
+		SnapshotConcurrency:      1,
+		DBPath:                   filepath.Join(configDir(), "godshell.db"),
+		SocketPath:               "/var/run/godshell.sock",
+		ProcPath:                 "/proc",
+		SysPath:                  "/sys",
+		EnrichmentWorkers:        4,
+		MaxEffectsPerProcess:     1000,
+		CaptureNetwork:           true,
+		CaptureFileIO:            true,
+		IgnoredProcesses:         []string{"godshell", "systemd", "dbus-daemon"},
 	}
 }
 

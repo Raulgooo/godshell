@@ -120,3 +120,17 @@ func ListSnapshots() ([]SnapshotMeta, error) {
 	}
 	return list, nil
 }
+
+// PruneSnapshots deletes snapshots older than the specified hours.
+func PruneSnapshots(hours int) (int64, error) {
+	if db == nil || hours <= 0 {
+		return 0, nil
+	}
+
+	res, err := db.Exec("DELETE FROM snapshots WHERE timestamp < datetime('now', '-' || ? || ' hours')", hours)
+	if err != nil {
+		return 0, fmt.Errorf("failed to prune snapshots: %w", err)
+	}
+
+	return res.RowsAffected()
+}

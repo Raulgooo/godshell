@@ -13,8 +13,10 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -38,7 +40,29 @@ func (t *ProcessTree) TakeSnapshot() *FrozenSnapshot {
 	}
 
 	for pid, node := range t.ByPID {
-		frozen.ByPID[pid] = node.Clone()
+		if !node.IsEnriched {
+			// Slow enrichment while holding RLock is bad, but TakeSnapshot is the only place.
+			// Better: Upgrade to Write Lock for enrichment, then downgrade?
+			// For simplicity and since TakeSnapshot is "poll" time, we just do it.
+			// To be safe, we release lock, enrich, and re-acquire? No, TakeSnapshot needs consistency.
+			// Actually handlers.go functions use t.mu.Lock(), so we MUST release RLock first to avoid deadlock.
+			t.mu.RUnlock()
+			t.EnrichProcessMetadata(pid)
+			// Enrich connection effects
+			for key, eff := range node.Effects {
+				if eff.Kind == EffectConnect {
+					t.EnrichConnectionMetadata(pid, key, nil)
+				}
+			}
+			t.mu.RLock()
+			if n, ok := t.ByPID[pid]; ok {
+				n.IsEnriched = true
+			}
+		}
+		// Re-check node exists after lock dance
+		if n, ok := t.ByPID[pid]; ok {
+			frozen.ByPID[pid] = n.Clone()
+		}
 	}
 	for pid, node := range t.Ghosts {
 		frozen.Ghosts[pid] = node.Clone()
@@ -1016,32 +1040,336 @@ func (fs *FrozenSnapshot) ReadMemory(pid uint32, address uint64, size int64) str
 		size = 1024 * 1024
 	}
 
+	data, err := fs.ReadMemoryRaw(pid, address, size)
+	if err != nil {
+		return fmt.Sprintf("[Read Memory: %d] (%s)\nError reading memory at 0x%x: %v\n(Check permissions, or process may have died/be protected)", pid, p.Comm, address, err)
+	}
+
+	if len(data) == 0 {
+		return fmt.Sprintf("[Read Memory: %d] (%s)\n(0 bytes read at address 0x%x. Unmapped region?)", pid, p.Comm, address)
+	}
+
+	printable := 0
+	for _, b := range data {
+		if b >= 32 && b <= 126 {
+			printable++
+		}
+	}
+	pct := (printable * 100) / len(data)
+
+	return fmt.Sprintf("PID %d @ 0x%x · %d bytes · %d%% printable\n\n%s",
+		pid, address, len(data), pct, hex.Dump(data))
+}
+
+// ptraceAttach attaches to the process. Note: requires CAP_SYS_PTRACE or root.
+func ptraceAttach(pid uint32) error {
+	runtime.LockOSThread()
+	return syscall.PtraceAttach(int(pid))
+}
+
+// ptraceDetach detaches from the process.
+func ptraceDetach(pid uint32) error {
+	defer runtime.UnlockOSThread()
+	return syscall.PtraceDetach(int(pid))
+}
+
+// ReadMemoryRaw is a helper that returns raw bytes or an error.
+// It uses ptrace to ensure consistent access via /proc/pid/mem.
+func (fs *FrozenSnapshot) ReadMemoryRaw(pid uint32, address uint64, size int64) ([]byte, error) {
+	if err := ptraceAttach(pid); err != nil {
+		return nil, fmt.Errorf("ptrace attach failed: %w", err)
+	}
+	// Wait for process to stop
+	var status syscall.WaitStatus
+	if _, err := syscall.Wait4(int(pid), &status, 0, nil); err != nil {
+		ptraceDetach(pid)
+		return nil, fmt.Errorf("waitpid failed: %w", err)
+	}
+
+	defer ptraceDetach(pid)
+	return fs.ReadMemoryRawLocked(pid, address, size)
+}
+
+// ReadMemoryRawLocked reads memory from /proc/pid/mem assuming ptrace is already attached.
+func (fs *FrozenSnapshot) ReadMemoryRawLocked(pid uint32, address uint64, size int64) ([]byte, error) {
 	memPath := fmt.Sprintf("/proc/%d/mem", pid)
 	file, err := os.Open(memPath)
 	if err != nil {
-		return fmt.Sprintf("[Read Memory: %d] (%s)\nError opening %s: %v\n(Check permissions, or process may have died/be protected)", pid, p.Comm, memPath, err)
+		return nil, fmt.Errorf("open /proc/mem: %w", err)
 	}
 	defer file.Close()
 
 	if _, err := file.Seek(int64(address), 0); err != nil {
-		return fmt.Sprintf("[Read Memory: %d] (%s)\nError seeking to address 0x%x: %v\n(Address may be unmapped or invalid)", pid, p.Comm, address, err)
+		return nil, fmt.Errorf("seek error: %w", err)
 	}
 
 	buf := make([]byte, size)
 	n, err := file.Read(buf)
-	if err != nil && err.Error() != "EOF" {
-		return fmt.Sprintf("[Read Memory: %d] (%s)\nError reading memory at 0x%x: %v", pid, p.Comm, address, err)
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("read error: %w", err)
+	}
+	return buf[:n], nil
+}
+
+// ListHeapRegions returns a JSON summary of scan-worthy memory regions for a process.
+func (fs *FrozenSnapshot) ListHeapRegions(pid uint32) (string, error) {
+	if _, ok := fs.ByPID[pid]; !ok {
+		if _, ok := fs.Ghosts[pid]; !ok {
+			return "", fmt.Errorf("process %d not found", pid)
+		}
 	}
 
-	if n == 0 {
-		return fmt.Sprintf("[Read Memory: %d] (%s)\n(0 bytes read at address 0x%x. Unmapped region?)", pid, p.Comm, address)
+	mapsPath := fmt.Sprintf("/proc/%d/maps", pid)
+	content, err := os.ReadFile(mapsPath)
+	if err != nil {
+		return "", fmt.Errorf("error reading maps: %w", err)
 	}
 
-	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("[Read Memory: %d] (%s) (Address: 0x%x, Read: %d bytes)\n\n", pid, p.Comm, address, n))
-	builder.WriteString(hex.Dump(buf[:n]))
+	var regions []RegionSummary
+	scanner := bufio.NewScanner(strings.NewReader(string(content)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
 
-	return builder.String()
+		perms := fields[1]
+		// Consider regions that are private AND either writable or executable
+		if !strings.HasSuffix(perms, "p") || (!strings.Contains(perms, "w") && !strings.Contains(perms, "x")) {
+			continue
+		}
+
+		addrRange := strings.Split(fields[0], "-")
+		if len(addrRange) != 2 {
+			continue
+		}
+		var start, end uint64
+		fmt.Sscanf(addrRange[0], "%x", &start)
+		fmt.Sscanf(addrRange[1], "%x", &end)
+
+		label := ""
+		if len(fields) >= 6 {
+			label = strings.Join(fields[5:], " ")
+		}
+		if label == "" {
+			label = "[anon]"
+		}
+
+		regions = append(regions, RegionSummary{
+			StartAddr: start,
+			EndAddr:   end,
+			Size:      int64(end - start),
+			Perms:     perms,
+			Label:     label,
+		})
+	}
+
+	data, err := json.MarshalIndent(regions, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// ReadRegion reads a specific chunk of memory and returns it in a requested format.
+func (fs *FrozenSnapshot) ReadRegion(pid uint32, startAddr uint64, size int64, encoding string) (string, error) {
+	data, err := fs.ReadMemoryRaw(pid, startAddr, size)
+	if err != nil {
+		return "", err
+	}
+
+	switch encoding {
+	case "hex":
+		return hex.Dump(data), nil
+	case "utf8":
+		return string(data), nil
+	case "strings":
+		// Simple strings implementation
+		var result []string
+		re := regexp.MustCompile(`[\w\.\-/]{4,}`)
+		matches := re.FindAll(data, -1)
+		for _, m := range matches {
+			result = append(result, string(m))
+		}
+		return strings.Join(result, "\n"), nil
+	default:
+		return hex.Dump(data), nil
+	}
+}
+
+// ScanHeap identifies all suspicious regions and scans them, returning a structured JSON result.
+func (fs *FrozenSnapshot) ScanHeap(pid uint32, mode string) (string, error) {
+	p, ok := fs.ByPID[pid]
+	if !ok {
+		p, ok = fs.Ghosts[pid]
+		if !ok {
+			return "", fmt.Errorf("process %d not found", pid)
+		}
+	}
+
+	result := HeapScanResult{
+		PID:      pid,
+		Comm:     p.Comm,
+		Regions:  []RegionSummary{},
+		Findings: []Finding{},
+	}
+
+	regionsRaw, err := fs.ListHeapRegions(pid)
+	if err != nil {
+		result.Error = err.Error()
+		b, _ := json.Marshal(result)
+		return string(b), nil
+	}
+
+	var regions []RegionSummary
+	json.Unmarshal([]byte(regionsRaw), &regions)
+
+	// Filter regions for ScanHeap (exclude obvious system libraries, keep anon)
+	var filtered []RegionSummary
+	for _, reg := range regions {
+		isLib := strings.HasPrefix(reg.Label, "/usr/lib") || strings.HasPrefix(reg.Label, "/lib")
+		isBinary := reg.Label == p.BinaryPath
+		isAnon := strings.HasPrefix(reg.Label, "[anon]") || strings.Contains(reg.Label, "anon")
+		isHeap := strings.HasPrefix(reg.Label, "[heap]")
+		isStack := strings.HasPrefix(reg.Label, "[stack]")
+
+		if !isLib && (isAnon || isHeap || isStack || !strings.HasPrefix(reg.Label, "/")) {
+			filtered = append(filtered, reg)
+		} else if isBinary && strings.Contains(reg.Perms, "w") {
+			// Include writable sections of the binary itself
+			filtered = append(filtered, reg)
+		}
+	}
+	result.Regions = filtered
+
+	// Patterns
+	reIP := regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	reURL := regexp.MustCompile(`https?://[^\s"'>]+`)
+	rePath := regexp.MustCompile(`/(?:tmp|var/tmp|home|etc)/[^\s"'>]+`)
+	reKey := regexp.MustCompile(`(?i)(?:key|secret|token|auth|passwd|password)["']?\s*[:=]\s*["']?([a-zA-Z0-9\-_+/=]{16,})|([a-zA-Z0-9\_]{8,255}_[0-9]{10,}_[A-Z0-9]{10,})`)
+
+	foundMap := make(map[string]bool)
+	stats := ScanStats{
+		RegionsScanned: len(filtered),
+	}
+
+	// Attach ptrace once for the whole scan session
+	if err := ptraceAttach(pid); err == nil {
+		var status syscall.WaitStatus
+		syscall.Wait4(int(pid), &status, 0, nil)
+		defer ptraceDetach(pid)
+	} else {
+		// If attach fails, we try reading without it, might still work for some regions or if privileged
+		stats.ReadErrors++
+		result.Findings = append(result.Findings, Finding{
+			Kind:    "PTRACE_FAILED",
+			Value:   err.Error(),
+			Address: 0,
+			Region:  "",
+			Score:   0,
+		})
+	}
+
+	for _, reg := range filtered {
+		// Adaptive strategy for ScanHeap
+		var chunks []struct {
+			off  int64
+			size int64
+		}
+
+		if reg.Size < 2*1024*1024 {
+			chunks = append(chunks, struct {
+				off  int64
+				size int64
+			}{0, reg.Size})
+		} else if mode == "deep" {
+			// Deep: Scan in 1MB chunks every 4MB
+			for off := int64(0); off < reg.Size; off += 4 * 1024 * 1024 {
+				chunkSize := int64(1024 * 1024)
+				if off+chunkSize > reg.Size {
+					chunkSize = reg.Size - off
+				}
+				chunks = append(chunks, struct {
+					off  int64
+					size int64
+				}{off, chunkSize})
+			}
+		} else {
+			// Quick (default): Scan first 1MB and last 1MB of large regions
+			chunks = append(chunks, struct {
+				off  int64
+				size int64
+			}{0, 1024 * 1024})
+			chunks = append(chunks, struct {
+				off  int64
+				size int64
+			}{reg.Size - 1024*1024, 1024 * 1024})
+			stats.Truncated = true
+		}
+
+		for _, chk := range chunks {
+			if chk.size <= 0 {
+				continue
+			}
+			data, readErr := fs.ReadMemoryRawLocked(pid, reg.StartAddr+uint64(chk.off), chk.size)
+			if readErr != nil {
+				stats.ReadErrors++
+				continue
+			}
+			stats.BytesRead += int64(len(data))
+			strData := string(data)
+
+			addFinding := func(kind, val string, addr uint64) {
+				if !foundMap[val] {
+					foundMap[val] = true
+					score := 50
+					if kind == "POTENT_KEY" {
+						score = 90
+					} else if kind == "URL" && (strings.Contains(val, "api") || strings.Contains(val, "secret")) {
+						score = 80
+					}
+
+					result.Findings = append(result.Findings, Finding{
+						Kind:    kind,
+						Value:   val,
+						Address: addr,
+						Region:  reg.Label,
+						Score:   score,
+					},
+					)
+					stats.FindingsTotal++
+				}
+			}
+
+			for _, m := range reIP.FindAllStringIndex(strData, -1) {
+				addFinding("IP_ADDR", strData[m[0]:m[1]], reg.StartAddr+uint64(chk.off)+uint64(m[0]))
+			}
+			for _, m := range reURL.FindAllStringIndex(strData, -1) {
+				addFinding("URL", strData[m[0]:m[1]], reg.StartAddr+uint64(chk.off)+uint64(m[0]))
+			}
+			for _, m := range rePath.FindAllStringIndex(strData, -1) {
+				addFinding("SENS_PATH", strData[m[0]:m[1]], reg.StartAddr+uint64(chk.off)+uint64(m[0]))
+			}
+			for _, m := range reKey.FindAllStringSubmatchIndex(strData, -1) {
+				if len(m) >= 4 {
+					addFinding("POTENT_KEY", strData[m[2]:m[3]], reg.StartAddr+uint64(chk.off)+uint64(m[2]))
+				}
+			}
+
+			if stats.FindingsTotal > 200 {
+				stats.Truncated = true
+				break
+			}
+		}
+		if stats.FindingsTotal > 200 {
+			break
+		}
+	}
+
+	result.Stats = stats
+	out, _ := json.MarshalIndent(result, "", "  ")
+	return string(out), nil
 }
 
 // ── JSON Endpoints ─────────────────────────────────────────────────────────
@@ -1110,19 +1438,21 @@ func (fs *FrozenSnapshot) InspectJSON(pid uint32) (string, error) {
 	}
 
 	// Effects
-	for _, eff := range p.Effects {
+	collapsedEffs := collapseEffects(p.Effects)
+	for _, eff := range collapsedEffs {
 		effJ := EffectJSON{
-			Label: eff.Target,
-			Count: eff.Count,
+			Label:  eff.Label,
+			Count:  eff.Count,
+			Unique: eff.Unique,
 		}
 		if eff.Kind == EffectOpen {
 			effJ.Category = "open"
 			resp.FileEffects = append(resp.FileEffects, effJ)
 		} else {
 			effJ.Category = "connect"
-			if strings.HasPrefix(eff.Target, "unix:") {
+			if strings.HasPrefix(eff.Original, "unix:") {
 				effJ.Subtype = "unix_socket"
-				effJ.Label = eff.Target[5:]
+				effJ.Label = eff.Original[5:]
 			} else {
 				effJ.Subtype = "network"
 			}

@@ -42,11 +42,11 @@ type tcpEntry struct {
 	Family     uint16 // 2=AF_INET, 10=AF_INET6
 }
 
-// enrichConnect reads /proc/<pid>/net/tcp and tcp6 to find the newest
+// enrichConnect reads <proc>/<pid>/net/tcp and tcp6 to find the newest
 // connection. Returns nil if the process is gone or has no connections.
-func enrichConnect(pid uint32) *ConnectDetail {
-	entries := parseProcNetTCP(pid, false)                   // IPv4
-	entries = append(entries, parseProcNetTCP(pid, true)...) // IPv6
+func enrichConnect(procPath string, pid uint32) *ConnectDetail {
+	entries := parseProcNetTCP(procPath, pid, false)                   // IPv4
+	entries = append(entries, parseProcNetTCP(procPath, pid, true)...) // IPv6
 
 	if len(entries) > 0 {
 		// Pick the best entry: prefer ESTABLISHED (1) or SYN_SENT (2)
@@ -75,8 +75,8 @@ func enrichConnect(pid uint32) *ConnectDetail {
 		}
 	}
 
-	// Fallback to /proc/<pid>/net/unix for local IPC
-	path := parseProcNetUnix(pid)
+	// Fallback to <proc>/<pid>/net/unix for local IPC
+	path := parseProcNetUnix(procPath, pid)
 	if path != "" {
 		return &ConnectDetail{
 			Family:     1, // AF_UNIX
@@ -87,10 +87,10 @@ func enrichConnect(pid uint32) *ConnectDetail {
 	return nil
 }
 
-// parseProcNetUnix reads /proc/<pid>/net/unix and returns the path
+// parseProcNetUnix reads <proc>/<pid>/net/unix and returns the path
 // of the last connected unix socket (skips empty paths and anonymous sockets).
-func parseProcNetUnix(pid uint32) string {
-	path := fmt.Sprintf("/proc/%d/net/unix", pid)
+func parseProcNetUnix(procPath string, pid uint32) string {
+	path := fmt.Sprintf("%s/%d/net/unix", procPath, pid)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -119,12 +119,12 @@ func parseProcNetUnix(pid uint32) string {
 	return lastPath
 }
 
-// parseProcNetTCP reads /proc/<pid>/net/tcp or tcp6 and returns parsed entries.
-func parseProcNetTCP(pid uint32, ipv6 bool) []tcpEntry {
-	path := fmt.Sprintf("/proc/%d/net/tcp", pid)
+// parseProcNetTCP reads <proc>/<pid>/net/tcp or tcp6 and returns parsed entries.
+func parseProcNetTCP(procPath string, pid uint32, ipv6 bool) []tcpEntry {
+	path := fmt.Sprintf("%s/%d/net/tcp", procPath, pid)
 	family := uint16(2) // AF_INET
 	if ipv6 {
-		path = fmt.Sprintf("/proc/%d/net/tcp6", pid)
+		path = fmt.Sprintf("%s/%d/net/tcp6", procPath, pid)
 		family = 10 // AF_INET6
 	}
 

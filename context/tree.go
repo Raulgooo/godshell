@@ -99,6 +99,7 @@ type ProcessNode struct {
 	ChildrenPID    []uint32
 	CpuUsage       float64
 	MemoryUsage    uint64
+	IsEnriched     bool
 }
 
 // Clone deeply copies an Effect.
@@ -136,7 +137,15 @@ func (n *ProcessNode) Clone() *ProcessNode {
 }
 
 type ProcessTree struct {
-	mu     sync.RWMutex            //OS stuff lol
-	ByPID  map[uint32]*ProcessNode //Lookup active processes by PID (O1)
-	Ghosts map[uint32]*ProcessNode //Lookup Ghosts/Dead processes. They stay for the last x seconds
+	mu     sync.RWMutex
+	ByPID  map[uint32]*ProcessNode
+	Ghosts map[uint32]*ProcessNode
+
+	// Dynamic Configuration
+	MaxEffectsPerProcess int
+	CaptureNetwork       bool
+	CaptureFileIO        bool
+	IgnoredProcesses     map[string]struct{}
+	ProcPath             string
+	SysPath              string
 }

@@ -55,13 +55,22 @@ type Conversation struct {
 	CurrentSnapshot *ctxengine.FrozenSnapshot
 	DaemonClient    *client.DaemonClient // optional: if set, proxy tool calls here
 	Intel           *intel.Client        // optional: threat intel client
+	MaxResultChars  int                  // max characters for a single tool result
+	MaxTotalTokens  int                  // soft limit for total conversation tokens
 }
+
+const (
+	DefaultMaxResultChars = 100000 // approx 25k tokens
+	DefaultMaxTotalTokens = 200000 // safe buffer for a 256k context
+)
 
 func NewConversation(snap *ctxengine.FrozenSnapshot, daemonClient *client.DaemonClient) *Conversation {
 	c := &Conversation{
 		History:         []Message{},
 		CurrentSnapshot: snap,
 		DaemonClient:    daemonClient,
+		MaxResultChars:  DefaultMaxResultChars,
+		MaxTotalTokens:  DefaultMaxTotalTokens,
 	}
 
 	// Master system prompt to establish investigatory identity
@@ -189,9 +198,54 @@ func (c *Conversation) GetToolDefinitions() []Tool {
 					"type": "object",
 					"properties": {
 						"pid": {"type": "integer", "description": "The process ID to trace"},
-						"duration": {"type": "integer", "description": "Tracing duration in seconds (default 5)"}
+						"duration": {"type": "integer", "description": "Trace duration in seconds (default 5)"}
 					},
 					"required": ["pid"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: Function{
+				Name:        "scan_heap",
+				Description: "Statically scan process heap and anonymous regions for patterns (IPs, URLs, secrets). Returns structured JSON.",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {
+						"pid": {"type": "integer", "description": "The process ID to scan"}
+					},
+					"required": ["pid"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: Function{
+				Name:        "list_heap_regions",
+				Description: "List all memory regions for a process, including sizes and permissions. Use this to identify large anonymous regions for deeper scanning.",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {
+						"pid": {"type": "integer", "description": "The process ID to inspect"}
+					},
+					"required": ["pid"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: Function{
+				Name:        "read_region",
+				Description: "Read a specific memory region at a given address and size. Supports hex, utf8, or strings extraction.",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {
+						"pid": {"type": "integer", "description": "The process ID to read from"},
+						"start": {"type": "string", "description": "Start address in hex (no 0x prefix)"},
+						"size": {"type": "integer", "description": "Number of bytes to read"},
+						"encoding": {"type": "string", "description": "Output format: hex, utf8, strings"}
+					},
+					"required": ["pid", "start", "size"]
 				}`),
 			},
 		},
@@ -318,6 +372,51 @@ func (c *Conversation) UpdateSnapshot(newSnap *ctxengine.FrozenSnapshot) {
 	})
 }
 
+// TruncateString ensures a string doesn't exceed a maximum length.
+func TruncateString(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "\n... [TRUNCATED DUE TO CONTEXT LIMITS] ..."
+}
+
+// ManageHistory prunes the conversation history to stay within token limits.
+// It keeps the system prompt and uses a sliding window for the rest.
+func (c *Conversation) ManageHistory() {
+	if len(c.History) <= 2 {
+		return
+	}
+
+	// Simple heuristic: 1 token ~= 4 chars
+	// More accurate would be a real tokenizer, but this works for safety.
+	totalChars := 0
+	for _, m := range c.History {
+		totalChars += len(m.Content)
+	}
+
+	maxChars := c.MaxTotalTokens * 4
+
+	if totalChars <= maxChars {
+		return
+	}
+
+	// Keep the first message (system prompt)
+	systemPrompt := c.History[0]
+	others := c.History[1:]
+
+	// Prune from the beginning of 'others' until we are under the limit
+	for len(others) > 1 && totalChars > maxChars {
+		msg := others[0]
+		totalChars -= len(msg.Content)
+		others = others[1:]
+	}
+
+	newHistory := make([]Message, 0, len(others)+1)
+	newHistory = append(newHistory, systemPrompt)
+	newHistory = append(newHistory, others...)
+	c.History = newHistory
+}
+
 // ExecuteTool dispatches LLM tool calls to the appropriate Snapshot JSON methods.
 func (c *Conversation) ExecuteTool(toolName string, args map[string]interface{}) (string, error) {
 	// If the tool is disabled, block it here.
@@ -328,21 +427,6 @@ func (c *Conversation) ExecuteTool(toolName string, args map[string]interface{})
 	}
 
 	// Intel tools don't need a snapshot or daemon; handle them here first.
-	// (Hidden but kept for easier reactivation)
-	/*
-		case "virustotal_hash":
-			sha256, _ := args["sha256"].(string)
-			if sha256 == "" { return "", fmt.Errorf("missing sha256") }
-			if c.Intel == nil { return "VirusTotal: no API key", nil }
-			r := c.Intel.LookupHash(sha256)
-			return fmt.Sprintf("VirusTotal summary: %s", r.Summary), nil
-		case "abuseipdb_ip":
-			ip, _ := args["ip"].(string)
-			if ip == "" { return "", fmt.Errorf("missing ip") }
-			if c.Intel == nil { return "AbuseIPDB: no API key", nil }
-			r := c.Intel.LookupIP(ip)
-			return fmt.Sprintf("AbuseIPDB score: %d/100", r.AbuseScore), nil
-	*/
 
 	// If we are functioning as a CLI connected to a daemon, proxy privileged requests.
 	if c.DaemonClient != nil && IsPrivilegedTool(toolName) {
@@ -353,7 +437,11 @@ func (c *Conversation) ExecuteTool(toolName string, args map[string]interface{})
 		return "", fmt.Errorf("no snapshot loaded")
 	}
 
-	return ExecuteToolOnSnapshot(toolName, args, c.CurrentSnapshot)
+	res, err := ExecuteToolOnSnapshot(toolName, args, c.CurrentSnapshot)
+	if err != nil {
+		return "", err
+	}
+	return TruncateString(res, c.MaxResultChars), nil
 }
 
 // ExecuteToolOnSnapshot statically evaluates a tool against a given snapshot.
@@ -425,13 +513,6 @@ func ExecuteToolOnSnapshot(toolName string, args map[string]interface{}, snap *c
 			size = int64(s)
 		}
 		return snap.ReadMemory(uint32(pid), addr, size), nil
-	case "gohash_binary":
-		pidVal, ok := args["pid"]
-		if !ok {
-			return "", fmt.Errorf("missing pid argument")
-		}
-		pid, _ := pidVal.(float64)
-		return snap.HashBinary(uint32(pid)), nil
 	case "goread_shell_history":
 		user, ok := args["user"].(string)
 		if !ok {
@@ -466,6 +547,31 @@ func ExecuteToolOnSnapshot(toolName string, args map[string]interface{}, snap *c
 			minLength = m
 		}
 		return snap.ExtractStrings(path, int(minLength)), nil
+	case "scan_heap":
+		pidVal := args["pid"]
+		pid, _ := pidVal.(float64)
+		mode, _ := args["mode"].(string)
+		if mode == "" {
+			mode = "quick"
+		}
+		return snap.ScanHeap(uint32(pid), mode)
+	case "list_heap_regions":
+		pidVal := args["pid"]
+		pid, _ := pidVal.(float64)
+		return snap.ListHeapRegions(uint32(pid))
+	case "read_region":
+		pidVal := args["pid"]
+		pid, _ := pidVal.(float64)
+		startStr, _ := args["start"].(string)
+		startStr = strings.TrimPrefix(startStr, "0x")
+		start, _ := strconv.ParseUint(startStr, 16, 64)
+		sizeVal := args["size"]
+		size, _ := sizeVal.(float64)
+		encoding, _ := args["encoding"].(string)
+		if encoding == "" {
+			encoding = "hex"
+		}
+		return snap.ReadRegion(uint32(pid), start, int64(size), encoding)
 	default:
 		return "", fmt.Errorf("unknown or disabled tool: %s", toolName)
 	}
@@ -477,9 +583,10 @@ func IsPrivilegedTool(name string) bool {
 	case "summary", "inspect", "search", "family", "browser_map",
 		"report_text", "report_behaviour", "report_family", "report_network", "report_threat", "report_system_state":
 		return false
-	case "get_maps", "get_libraries", "trace", "read_file", "read_memory",
-		"gohash_binary", "goread_shell_history", "gonetwork_state",
-		"goread_environ", "goextract_strings", "ssl_intercept":
+	case "get_maps", "trace", "read_file", "read_memory",
+		"goread_shell_history", "gonetwork_state",
+		"goread_environ", "goextract_strings", "ssl_intercept", "scan_heap",
+		"list_heap_regions", "read_region":
 		return true
 	default:
 		return false

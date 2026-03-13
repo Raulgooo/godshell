@@ -28,10 +28,19 @@ const (
 	fieldAPIKey = iota
 	fieldModel
 	fieldEndpoint
-	fieldSnapshotInterval
-	fieldSnapshotRetention
+	fieldSnapshotIntervalMin
+	fieldGhostProcessRetention
+	fieldDBSnapshotRetention
 	fieldSnapshotConcurrency
 	fieldDBPath
+	fieldSocketPath
+	fieldProcPath
+	fieldSysPath
+	fieldEnrichmentWorkers
+	fieldMaxEffectsPerProcess
+	fieldCaptureNetwork
+	fieldCaptureFileIO
+	fieldIgnoredProcesses
 	fieldCount
 )
 
@@ -39,10 +48,19 @@ var fieldNames = [fieldCount]string{
 	"API Key",
 	"Model",
 	"Endpoint",
-	"Snapshot Interval (sec)",
-	"Snapshot Retention (sec)",
+	"Snapshot Interval (min, auto-save)",
+	"Ghost Process Retention (sec)",
+	"DB Snapshot Retention (hours)",
 	"Snapshot Concurrency",
 	"DB Path",
+	"Socket Path",
+	"Proc Path",
+	"Sys Path",
+	"Enrichment Workers",
+	"Max Effects Per Process",
+	"Capture Network (true/false)",
+	"Capture File I/O (true/false)",
+	"Ignored Processes (CSV)",
 }
 
 type configModel struct {
@@ -75,17 +93,44 @@ func newConfigModel(cfg config.Config) configModel {
 	inputs[fieldEndpoint].SetValue(cfg.Endpoint)
 	inputs[fieldEndpoint].Placeholder = "https://openrouter.ai/api/v1/chat/completions"
 
-	inputs[fieldSnapshotInterval].SetValue(strconv.Itoa(cfg.SnapshotIntervalSec))
-	inputs[fieldSnapshotInterval].Placeholder = "0 (manual only)"
+	inputs[fieldSnapshotIntervalMin].SetValue(strconv.Itoa(cfg.SnapshotIntervalMin))
+	inputs[fieldSnapshotIntervalMin].Placeholder = "0 (manual only)"
 
-	inputs[fieldSnapshotRetention].SetValue(strconv.Itoa(cfg.SnapshotRetentionSec))
-	inputs[fieldSnapshotRetention].Placeholder = "60"
+	inputs[fieldGhostProcessRetention].SetValue(strconv.Itoa(cfg.GhostProcessRetentionSec))
+	inputs[fieldGhostProcessRetention].Placeholder = "60"
+
+	inputs[fieldDBSnapshotRetention].SetValue(strconv.Itoa(cfg.DBSnapshotRetentionHours))
+	inputs[fieldDBSnapshotRetention].Placeholder = "24"
 
 	inputs[fieldSnapshotConcurrency].SetValue(strconv.Itoa(cfg.SnapshotConcurrency))
 	inputs[fieldSnapshotConcurrency].Placeholder = "1"
 
 	inputs[fieldDBPath].SetValue(cfg.DBPath)
 	inputs[fieldDBPath].Placeholder = "~/.config/godshell/godshell.db"
+
+	inputs[fieldSocketPath].SetValue(cfg.SocketPath)
+	inputs[fieldSocketPath].Placeholder = "/var/run/godshell.sock"
+
+	inputs[fieldProcPath].SetValue(cfg.ProcPath)
+	inputs[fieldProcPath].Placeholder = "/proc"
+
+	inputs[fieldSysPath].SetValue(cfg.SysPath)
+	inputs[fieldSysPath].Placeholder = "/sys"
+
+	inputs[fieldEnrichmentWorkers].SetValue(strconv.Itoa(cfg.EnrichmentWorkers))
+	inputs[fieldEnrichmentWorkers].Placeholder = "4"
+
+	inputs[fieldMaxEffectsPerProcess].SetValue(strconv.Itoa(cfg.MaxEffectsPerProcess))
+	inputs[fieldMaxEffectsPerProcess].Placeholder = "1000"
+
+	inputs[fieldCaptureNetwork].SetValue(strconv.FormatBool(cfg.CaptureNetwork))
+	inputs[fieldCaptureNetwork].Placeholder = "true"
+
+	inputs[fieldCaptureFileIO].SetValue(strconv.FormatBool(cfg.CaptureFileIO))
+	inputs[fieldCaptureFileIO].Placeholder = "true"
+
+	inputs[fieldIgnoredProcesses].SetValue(strings.Join(cfg.IgnoredProcesses, ","))
+	inputs[fieldIgnoredProcesses].Placeholder = "godshell,systemd"
 
 	inputs[0].Focus()
 
@@ -176,27 +221,43 @@ func (m configModel) View() string {
 }
 
 func (m configModel) toConfig() (config.Config, error) {
-	interval, err := strconv.Atoi(strings.TrimSpace(m.inputs[fieldSnapshotInterval].Value()))
-	if err != nil {
-		return config.Config{}, fmt.Errorf("snapshot interval must be a number")
-	}
-	retention, err := strconv.Atoi(strings.TrimSpace(m.inputs[fieldSnapshotRetention].Value()))
-	if err != nil {
-		return config.Config{}, fmt.Errorf("snapshot retention must be a number")
-	}
-	concurrency, err := strconv.Atoi(strings.TrimSpace(m.inputs[fieldSnapshotConcurrency].Value()))
-	if err != nil {
-		return config.Config{}, fmt.Errorf("snapshot concurrency must be a number")
+	interval, _ := strconv.Atoi(strings.TrimSpace(m.inputs[fieldSnapshotIntervalMin].Value()))
+	ghostRetention, _ := strconv.Atoi(strings.TrimSpace(m.inputs[fieldGhostProcessRetention].Value()))
+	dbRetention, _ := strconv.Atoi(strings.TrimSpace(m.inputs[fieldDBSnapshotRetention].Value()))
+	concurrency, _ := strconv.Atoi(strings.TrimSpace(m.inputs[fieldSnapshotConcurrency].Value()))
+
+	dbPath := strings.TrimSpace(m.inputs[fieldDBPath].Value())
+
+	workers, _ := strconv.Atoi(strings.TrimSpace(m.inputs[fieldEnrichmentWorkers].Value()))
+	maxEffs, _ := strconv.Atoi(strings.TrimSpace(m.inputs[fieldMaxEffectsPerProcess].Value()))
+	capNet, _ := strconv.ParseBool(strings.TrimSpace(m.inputs[fieldCaptureNetwork].Value()))
+	capFile, _ := strconv.ParseBool(strings.TrimSpace(m.inputs[fieldCaptureFileIO].Value()))
+
+	ignoredStr := strings.TrimSpace(m.inputs[fieldIgnoredProcesses].Value())
+	var ignored []string
+	if ignoredStr != "" {
+		for _, s := range strings.Split(ignoredStr, ",") {
+			ignored = append(ignored, strings.TrimSpace(s))
+		}
 	}
 
 	return config.Config{
-		APIKey:               strings.TrimSpace(m.inputs[fieldAPIKey].Value()),
-		Model:                strings.TrimSpace(m.inputs[fieldModel].Value()),
-		Endpoint:             strings.TrimSpace(m.inputs[fieldEndpoint].Value()),
-		SnapshotIntervalSec:  interval,
-		SnapshotRetentionSec: retention,
-		SnapshotConcurrency:  concurrency,
-		DBPath:               strings.TrimSpace(m.inputs[fieldDBPath].Value()),
+		APIKey:                   strings.TrimSpace(m.inputs[fieldAPIKey].Value()),
+		Model:                    strings.TrimSpace(m.inputs[fieldModel].Value()),
+		Endpoint:                 strings.TrimSpace(m.inputs[fieldEndpoint].Value()),
+		SnapshotIntervalMin:      interval,
+		GhostProcessRetentionSec: ghostRetention,
+		DBSnapshotRetentionHours: dbRetention,
+		SnapshotConcurrency:      concurrency,
+		DBPath:                   dbPath,
+		SocketPath:               strings.TrimSpace(m.inputs[fieldSocketPath].Value()),
+		ProcPath:                 strings.TrimSpace(m.inputs[fieldProcPath].Value()),
+		SysPath:                  strings.TrimSpace(m.inputs[fieldSysPath].Value()),
+		EnrichmentWorkers:        workers,
+		MaxEffectsPerProcess:     maxEffs,
+		CaptureNetwork:           capNet,
+		CaptureFileIO:            capFile,
+		IgnoredProcesses:         ignored,
 	}, nil
 }
 

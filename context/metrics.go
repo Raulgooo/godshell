@@ -25,8 +25,8 @@ func (t *ProcessTree) RefreshMetrics(interval time.Duration) {
 	for range ticker.C {
 		t.mu.Lock()
 		for pid, proc := range t.ByPID {
-			cpu := readCPUTicks(pid)
-			mem := readMemoryRSS(pid)
+			cpu := readCPUTicks(t.ProcPath, pid)
+			mem := readMemoryRSS(t.ProcPath, pid)
 
 			proc.MemoryUsage = mem
 
@@ -54,10 +54,10 @@ func (t *ProcessTree) RefreshMetrics(interval time.Duration) {
 	}
 }
 
-// readCPUTicks reads utime and stime from /proc/<pid>/stat.
+// readCPUTicks reads utime and stime from <proc>/<pid>/stat.
 // Format: pid (comm) state ppid ... utime(14) stime(15) ...
-func readCPUTicks(pid uint32) *prevCPU {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+func readCPUTicks(procPath string, pid uint32) *prevCPU {
+	data, err := os.ReadFile(fmt.Sprintf("%s/%d/stat", procPath, pid))
 	if err != nil {
 		return nil
 	}
@@ -90,9 +90,9 @@ func readCPUTicks(pid uint32) *prevCPU {
 	}
 }
 
-// readMemoryRSS reads VmRSS from /proc/<pid>/status in KB.
-func readMemoryRSS(pid uint32) uint64 {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+// readMemoryRSS reads VmRSS from <proc>/<pid>/status in KB.
+func readMemoryRSS(procPath string, pid uint32) uint64 {
+	data, err := os.ReadFile(fmt.Sprintf("%s/%d/status", procPath, pid))
 	if err != nil {
 		return 0
 	}

@@ -6,13 +6,119 @@ import (
 	"strings"
 	"time"
 
+	"godshell/config"
 	"godshell/observer"
 )
 
-func NewProcessTree() *ProcessTree {
-	return &ProcessTree{
-		ByPID:  make(map[uint32]*ProcessNode),
-		Ghosts: make(map[uint32]*ProcessNode),
+func NewProcessTree(cfg config.Config) *ProcessTree {
+	ignored := make(map[string]struct{})
+	for _, p := range cfg.IgnoredProcesses {
+		ignored[p] = struct{}{}
+	}
+
+	t := &ProcessTree{
+		ByPID:                make(map[uint32]*ProcessNode),
+		Ghosts:               make(map[uint32]*ProcessNode),
+		MaxEffectsPerProcess: cfg.MaxEffectsPerProcess,
+		CaptureNetwork:       cfg.CaptureNetwork,
+		CaptureFileIO:        cfg.CaptureFileIO,
+		IgnoredProcesses:     ignored,
+		ProcPath:             cfg.ProcPath,
+		SysPath:              cfg.SysPath,
+	}
+	return t
+}
+
+func (t *ProcessTree) EnrichProcessMetadata(pid uint32) {
+	// Re-verify PID still exists in our tree
+	t.mu.Lock()
+	proc, ok := t.ByPID[pid]
+	if !ok {
+		t.mu.Unlock()
+		return
+	}
+	t.mu.Unlock()
+
+	// Slow /proc reads outside the lock
+	comm := readCmdline(t.ProcPath, pid, proc.Comm)
+	ppid := readPPID(t.ProcPath, pid)
+	bin := readBinaryPath(t.ProcPath, pid)
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	// Check again if still there
+	if proc, ok = t.ByPID[pid]; ok {
+		proc.Comm = comm
+		proc.PPID = ppid
+		proc.BinaryPath = bin
+
+		// Update parent's children if needed
+		if ppid > 0 {
+			if parent, ok := t.ByPID[ppid]; ok {
+				found := false
+				for _, cpid := range parent.ChildrenPID {
+					if cpid == pid {
+						found = true
+						break
+					}
+				}
+				if !found {
+					parent.ChildrenPID = append(parent.ChildrenPID, pid)
+				}
+			}
+		}
+	}
+}
+
+func (t *ProcessTree) EnrichConnectionMetadata(pid uint32, key string, bpfDetail *ConnectDetail) {
+	var detail *ConnectDetail
+	if bpfDetail != nil && bpfDetail.IP != "" {
+		detail = bpfDetail
+		// Still do DNS lookup if possible
+		detail.Domain = reverseDNS(detail.IP)
+	} else {
+		detail = enrichConnect(t.ProcPath, pid)
+	}
+
+	if detail == nil {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	proc, ok := t.ByPID[pid]
+	if !ok {
+		proc, ok = t.Ghosts[pid]
+		if !ok {
+			return
+		}
+	}
+
+	eff, ok := proc.Effects[key]
+	if !ok {
+		return
+	}
+
+	// Update the existing effect with enriched data
+	if d, ok := eff.Detail.(ConnectDetail); ok {
+		// Preserve captured stats but update metadata
+		detail.BytesSent += d.BytesSent
+		detail.BytesRecv += d.BytesRecv
+		eff.Detail = *detail
+	} else {
+		eff.Detail = *detail
+	}
+
+	// Re-key the effect if it was a fallback key and we now have a better one
+	if strings.HasPrefix(key, "connect:") && detail.IP != "" {
+		newKey := fmt.Sprintf("%s:%d", detail.IP, detail.Port)
+		if detail.Domain != "" {
+			newKey = fmt.Sprintf("%s (%s)", newKey, detail.Domain)
+		}
+		delete(proc.Effects, key)
+		eff.Target = newKey
+		proc.Effects[newKey] = eff
 	}
 }
 
@@ -22,36 +128,36 @@ func (t *ProcessTree) HandleEvent(e observer.Event) {
 	case observer.EventExec:
 		t.handleExec(e)
 	case observer.EventOpen:
-		t.handleOpen(e)
+		if t.CaptureFileIO {
+			t.handleOpen(e)
+		}
 	case observer.EventExit:
 		t.handleExit(e)
 	case observer.EventConnect:
-		t.handleConnect(e)
+		if t.CaptureNetwork {
+			t.handleConnect(e)
+		}
 	}
 }
 
-// handleExec creates a new ProcessNode from an execve event.
 func (t *ProcessTree) handleExec(e observer.Event) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	comm := e.CommStr()
+	if _, ok := t.IgnoredProcesses[comm]; ok {
+		return
+	}
+
 	proc := &ProcessNode{
 		PID:            e.Pid,
 		BinaryPath:     e.PathStr(),
-		Comm:           readCmdline(e.Pid, e.CommStr()),
+		Comm:           comm,
 		Effects:        make(map[string]*Effect),
 		StartTimestamp: time.Now(),
 	}
 
-	// Read PPID from /proc/<pid>/status
-	proc.PPID = readPPID(e.Pid)
-
-	// Link to parent's children list if parent is tracked
-	if parent, ok := t.ByPID[proc.PPID]; ok {
-		parent.ChildrenPID = append(parent.ChildrenPID, proc.PID)
-	}
-
-	t.ByPID[proc.PID] = proc
+	t.ByPID[e.Pid] = proc
 }
 
 // handleOpen upserts a file-open effect on the process.
@@ -66,6 +172,9 @@ func (t *ProcessTree) handleOpen(e observer.Event) {
 		eff.Count++
 		eff.Last = time.Now()
 	} else {
+		if len(proc.Effects) >= t.MaxEffectsPerProcess {
+			return
+		}
 		proc.Effects[path] = &Effect{
 			Kind:   EffectOpen,
 			Target: path,
@@ -99,44 +208,24 @@ func (t *ProcessTree) handleConnect(e observer.Event) {
 
 	proc := t.getOrCreateProc(e)
 
-	// Enrich from /proc/<pid>/net/tcp — best-effort, may fail for short-lived procs
-	detail := enrichConnect(e.Pid)
-	if detail == nil {
-		detail = &ConnectDetail{}
+	// Use a fallback key until enriched
+	key := fmt.Sprintf("connect:%d:%d", e.Pid, time.Now().UnixNano())
+
+	if len(proc.Effects) >= t.MaxEffectsPerProcess {
+		return
 	}
 
-	// Key by remote ip:port, unix socket, or fallback timestamp for dedup
-	var key string
-	if detail.IP != "" {
-		key = fmt.Sprintf("%s:%d", detail.IP, detail.Port)
-		if detail.Domain != "" {
-			key = fmt.Sprintf("%s (%s)", key, detail.Domain)
-		}
-	} else if detail.UnixSocket != "" {
-		key = fmt.Sprintf("unix:%s", detail.UnixSocket)
-	} else {
-		key = fmt.Sprintf("connect:%d:%d", e.Pid, time.Now().UnixNano())
+	proc.Effects[key] = &Effect{
+		Kind:   EffectConnect,
+		Target: key,
+		Count:  1,
+		First:  time.Now(),
+		Last:   time.Now(),
+		Detail: ConnectDetail{},
 	}
 
-	if eff, ok := proc.Effects[key]; ok {
-		eff.Count++
-		eff.Last = time.Now()
-		// Update bytes if we have newer data
-		if d, ok := eff.Detail.(ConnectDetail); ok {
-			d.BytesSent += detail.BytesSent
-			d.BytesRecv += detail.BytesRecv
-			eff.Detail = d
-		}
-	} else {
-		proc.Effects[key] = &Effect{
-			Kind:   EffectConnect,
-			Target: key,
-			Count:  1,
-			First:  time.Now(),
-			Last:   time.Now(),
-			Detail: *detail,
-		}
-	}
+	// In deferred enrichment mode, we don't do anything here.
+	// Metadata will be gathered during TakeSnapshot.
 }
 
 // getOrCreateProc returns the ProcessNode for the given PID,
@@ -147,30 +236,27 @@ func (t *ProcessTree) getOrCreateProc(e observer.Event) *ProcessNode {
 	}
 	proc := &ProcessNode{
 		PID:            e.Pid,
-		Comm:           readCmdline(e.Pid, e.CommStr()),
-		BinaryPath:     readBinaryPath(e.Pid),
+		Comm:           e.CommStr(),
 		Effects:        make(map[string]*Effect),
 		StartTimestamp: time.Now(),
-		PPID:           readPPID(e.Pid),
 	}
-	t.ByPID[e.Pid] = proc
 	return proc
 }
 
-// readBinaryPath reads the exe symlink from /proc/<pid>/exe.
+// readBinaryPath reads the exe symlink from <proc>/<pid>/exe.
 // Returns empty string if the process is gone or unreadable.
-func readBinaryPath(pid uint32) string {
-	target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+func readBinaryPath(procPath string, pid uint32) string {
+	target, err := os.Readlink(fmt.Sprintf("%s/%d/exe", procPath, pid))
 	if err != nil {
 		return ""
 	}
 	return target
 }
 
-// readCmdline reads the full command line from /proc/<pid>/cmdline.
+// readCmdline reads the full command line from <proc>/<pid>/cmdline.
 // It replaces null bytes with spaces to return a clean string.
-func readCmdline(pid uint32, fallback string) string {
-	cmdlineBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+func readCmdline(procPath string, pid uint32, fallback string) string {
+	cmdlineBytes, err := os.ReadFile(fmt.Sprintf("%s/%d/cmdline", procPath, pid))
 	if err != nil || len(cmdlineBytes) == 0 {
 		return fallback
 	}
@@ -199,10 +285,10 @@ func (t *ProcessTree) EvictGhosts(maxAge time.Duration) {
 	}
 }
 
-// readPPID reads the parent PID from /proc/<pid>/status.
+// readPPID reads the parent PID from <proc>/<pid>/status.
 // Returns 0 if the process is gone or unreadable.
-func readPPID(pid uint32) uint32 {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+func readPPID(procPath string, pid uint32) uint32 {
+	data, err := os.ReadFile(fmt.Sprintf("%s/%d/status", procPath, pid))
 	if err != nil {
 		return 0
 	}

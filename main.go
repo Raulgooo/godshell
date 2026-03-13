@@ -806,6 +806,9 @@ func (m model) viewLoader() string {
 
 func streamingChatLoop(client llm.Client, conv *llm.Conversation, ch chan<- tea.Msg) {
 	for {
+		// Ensure history is within limits before chatting
+		conv.ManageHistory()
+
 		resp, err := client.Chat(conv.History, conv.GetToolDefinitions())
 		if err != nil {
 			ch <- aiDoneMsg{err: err}
@@ -912,6 +915,8 @@ func extractMeta(name string, args map[string]interface{}, result string) string
 		return metaBrowserMap(result)
 	case "ssl_intercept":
 		return metaSSLIntercept(result, args)
+	case "scan_heap":
+		return metaScanHeap(result, args)
 	}
 	return trunc(firstNonEmptyLine(result), 60)
 }
@@ -1041,14 +1046,8 @@ func renderBeautifulInspect(result string, pid string) string {
 			PID  int    `json:"pid"`
 			Comm string `json:"comm"`
 		} `json:"children"`
-		NetEffects []struct {
-			Type    string `json:"type"`
-			Details string `json:"details"`
-		} `json:"network_effects"`
-		FileEffects []struct {
-			Type    string `json:"type"`
-			Details string `json:"details"`
-		} `json:"file_effects"`
+		NetEffects  []ctxengine.EffectJSON `json:"network_effects"`
+		FileEffects []ctxengine.EffectJSON `json:"file_effects"`
 	}
 
 	if err := json.Unmarshal([]byte(result), &data); err != nil {
@@ -1089,21 +1088,24 @@ func renderBeautifulInspect(result string, pid string) string {
 	}
 
 	if len(data.NetEffects) > 0 {
-		sb.WriteString(fmt.Sprintf("%s (%d)\n", toolCardHighStyle.Render("Network:"), len(data.NetEffects)))
+		sb.WriteString(fmt.Sprintf("%s (%d groups)\n", toolCardHighStyle.Render("Network:"), len(data.NetEffects)))
 		for _, e := range data.NetEffects {
-			sb.WriteString(hintStyle.Render(fmt.Sprintf("  • %s: %s\n", e.Type, e.Details)))
+			sb.WriteString(hintStyle.Render(fmt.Sprintf("  • %s ×%d\n", e.Label, e.Count)))
 		}
 	}
 
 	if len(data.FileEffects) > 0 {
-		sb.WriteString(fmt.Sprintf("%s (%d)\n", toolCardHighStyle.Render("Files:"), len(data.FileEffects)))
+		sb.WriteString(fmt.Sprintf("%s (%d groups)\n", toolCardHighStyle.Render("Files:"), len(data.FileEffects)))
 		max := len(data.FileEffects)
-		if max > 3 {
-			max = 3
+		if max > 5 {
+			max = 5
 		}
 		for i := 0; i < max; i++ {
 			e := data.FileEffects[i]
-			sb.WriteString(hintStyle.Render(fmt.Sprintf("  • %s: %s\n", e.Type, e.Details)))
+			sb.WriteString(hintStyle.Render(fmt.Sprintf("  • %s ×%d\n", e.Label, e.Count)))
+		}
+		if len(data.FileEffects) > 5 {
+			sb.WriteString(dimStyle.Render(fmt.Sprintf("  └─ ... %d more groups\n", len(data.FileEffects)-5)))
 		}
 	}
 
@@ -1646,6 +1648,8 @@ func iconForTool(name string) string {
 		return "📄"
 	case "read_memory":
 		return "⬡"
+	case "scan_heap":
+		return "🗜"
 	case "gohash_binary":
 		return "#"
 	case "goread_shell_history":
@@ -2081,7 +2085,7 @@ func runDaemon() {
 	// Change ownership/permissions so non-root can read/write if they access it directly later
 	_ = os.Chmod(cfg.DBPath, 0666)
 
-	tree := ctxengine.NewProcessTree()
+	tree := ctxengine.NewProcessTree(cfg)
 	events := make(chan observer.Event, 1000)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2098,9 +2102,32 @@ func runDaemon() {
 		}
 	}()
 	go tree.RefreshMetrics(2 * time.Second)
-	go tree.EvictGhosts(time.Duration(cfg.SnapshotRetentionSec) * time.Second)
+	go tree.EvictGhosts(time.Duration(cfg.GhostProcessRetentionSec) * time.Second)
 
-	srv := daemon.NewServer("/var/run/godshell.sock", tree)
+	// Auto-snapshotting every SnapshotIntervalMin (if > 0)
+	if cfg.SnapshotIntervalMin > 0 {
+		go func() {
+			ticker := time.NewTicker(time.Duration(cfg.SnapshotIntervalMin) * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				snap := tree.TakeSnapshot()
+				_, _ = store.SaveSnapshot("auto", snap)
+			}
+		}()
+	}
+
+	// Periodic DB pruning every hour
+	if cfg.DBSnapshotRetentionHours > 0 {
+		go func() {
+			ticker := time.NewTicker(1 * time.Hour)
+			defer ticker.Stop()
+			for range ticker.C {
+				_, _ = store.PruneSnapshots(cfg.DBSnapshotRetentionHours)
+			}
+		}()
+	}
+
+	srv := daemon.NewServer(cfg.SocketPath, tree)
 	if err := srv.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon server error: %v\n", err)
 		os.Exit(1)
@@ -2156,7 +2183,7 @@ func main() {
 	}
 
 	// Connect to Daemon
-	daemonClient := client.NewDaemonClient("/var/run/godshell.sock")
+	daemonClient := client.NewDaemonClient(cfg.SocketPath)
 	snap, err := daemonClient.GetSnapshot()
 	if err != nil {
 		fmt.Fprint(os.Stderr, errorStyle.Render("✗ Failed to connect to godshell daemon")+"\n")
@@ -2177,4 +2204,45 @@ func main() {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		os.Exit(1)
 	}
+}
+func metaScanHeap(result string, args map[string]interface{}) string {
+	pid := argStr(args, "pid")
+	lines := nonEmptyLines(result)
+
+	findings := 0
+	ips := 0
+	urls := 0
+	keys := 0
+
+	for _, line := range lines {
+		if strings.Contains(line, "IP_ADDR") {
+			ips++
+			findings++
+		}
+		if strings.Contains(line, "URL") {
+			urls++
+			findings++
+		}
+		if strings.Contains(line, "POTENT_KEY") {
+			keys++
+			findings++
+		}
+	}
+
+	if findings == 0 {
+		return "PID " + pid + " · No patterns found"
+	}
+
+	parts := []string{"PID " + pid}
+	if ips > 0 {
+		parts = append(parts, fmt.Sprintf("%d IPs", ips))
+	}
+	if urls > 0 {
+		parts = append(parts, fmt.Sprintf("%d URLs", urls))
+	}
+	if keys > 0 {
+		parts = append(parts, toolCardHighStyle.Render(fmt.Sprintf("%d Keys", keys)))
+	}
+
+	return strings.Join(parts, " · ")
 }

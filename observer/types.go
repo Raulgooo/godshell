@@ -22,6 +22,11 @@ type Event struct {
 	Type EventKind
 	Comm [16]byte
 	Path [256]byte
+	// Socket metadata
+	Family     uint16
+	Port       uint16
+	IPv4Remote uint32
+	IPv6Remote [16]byte
 }
 
 // CommStr returns the null-terminated process name as a Go string.
