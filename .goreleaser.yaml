@@ -1,4 +1,4 @@
-# .goreleaser.yaml
+version: 2
 project_name: godshell
 
 before:
@@ -43,7 +43,7 @@ nfpms:
       postinstall: ./packaging/postinstall.sh
 
 archives:
-  - format: tar.gz
+  - formats: ["tar.gz"]
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
     files:
       - LICENSE
@@ -53,7 +53,7 @@ checksum:
   name_template: "checksums.txt"
 
 snapshot:
-  name_template: "{{ .Tag }}-next"
+  version_template: "{{ .Tag }}-next"
 
 release:
   github:
