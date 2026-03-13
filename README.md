@@ -1,8 +1,7 @@
-# 👻 Godshell
-
-![Godshell Demo](demo.gif)
+# godshell - speaking directly to your kernel
 
 - A new way to interact with your kernel
+  ![Godshell Demo](demo.gif)
 
 **godshell.**
 
@@ -30,15 +29,26 @@ Unlike other tools, Godshell stays resident. Its eBPF observers capture:
 
 ## 🛠️ Installation
 
+### Option 1: One-Line Installation (Recommended)
+
+Download the pre-built package for your distribution from the [latest release](https://github.com/raulgooo/godshell/releases/latest) and install it:
+
+- **Debian/Ubuntu**: `sudo dpkg -i godshell_*.deb`
+- **RHEL/CentOS**: `sudo rpm -i godshell_*.rpm`
+- **Arch Linux**: `sudo pacman -U godshell_*.pkg.tar.zst`
+- **Alpine**: `apk add godshell_*.apk`
+
+Installing via package automatically sets up the **Godshell Daemon** as a `systemd` service.
+
+### Option 2: Build from Source
+
 Godshell requires a modern Linux kernel (5.8+) with BTF enabled.
 
 ```bash
-git clone https://github.com/raul/godshell
+git clone https://github.com/raulgooo/godshell
 cd godshell
 sudo ./setup.sh
 ```
-
-The setup script installs all kernel dependencies (`clang`, `libbpf-dev`, etc.) and compiles the eBPF probes and Go binary in one go.
 
 ---
 
