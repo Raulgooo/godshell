@@ -101,9 +101,12 @@ int trace_execve(struct sys_enter_ctx *ctx) {
   if (is_self(pid))
     return 0;
 
+  /* Relaxed: Allow capturing root/system processes for full visibility
   __u32 uid = (__u32)bpf_get_current_uid_gid();
   if (uid < 1000)
     return 0;
+  */
+  __u32 uid = (__u32)bpf_get_current_uid_gid();
 
   struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
   if (!e)
@@ -133,9 +136,12 @@ int trace_openat(struct sys_enter_ctx *ctx) {
   if (is_self(pid))
     return 0;
 
+  /* Relaxed: Allow capturing root/system processes for full visibility
   __u32 uid = (__u32)bpf_get_current_uid_gid();
   if (uid < 1000)
     return 0;
+  */
+  __u32 uid = (__u32)bpf_get_current_uid_gid();
 
   struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
   if (!e)

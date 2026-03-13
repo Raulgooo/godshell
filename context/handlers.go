@@ -3,6 +3,7 @@ package ctxengine
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -240,6 +241,7 @@ func (t *ProcessTree) getOrCreateProc(e observer.Event) *ProcessNode {
 		Effects:        make(map[string]*Effect),
 		StartTimestamp: time.Now(),
 	}
+	t.ByPID[e.Pid] = proc
 	return proc
 }
 
@@ -303,4 +305,75 @@ func readPPID(procPath string, pid uint32) uint32 {
 		}
 	}
 	return 0
+}
+
+// DiscoverExistingProcesses performs a one-time sweep of /proc to populate the tree
+// with processes that started before Godshell.
+func (t *ProcessTree) DiscoverExistingProcesses() {
+	entries, err := os.ReadDir(t.ProcPath)
+	if err != nil {
+		return
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pidInt, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		pid := uint32(pidInt)
+
+		t.mu.Lock()
+		if _, ok := t.ByPID[pid]; ok {
+			t.mu.Unlock()
+			continue
+		}
+		t.mu.Unlock()
+
+		// Metadata gathering (comm, ppid, bin)
+		comm := readCmdline(t.ProcPath, pid, "")
+		if comm == "" {
+			commBytes, _ := os.ReadFile(fmt.Sprintf("%s/%d/comm", t.ProcPath, pid))
+			comm = strings.TrimSpace(string(commBytes))
+		}
+		if comm == "" {
+			comm = fmt.Sprintf("pid:%d", pid)
+		}
+
+		ppid := readPPID(t.ProcPath, pid)
+		bin := readBinaryPath(t.ProcPath, pid)
+
+		t.mu.Lock()
+		if _, ok := t.ByPID[pid]; !ok {
+			node := &ProcessNode{
+				PID:            pid,
+				PPID:           ppid,
+				Comm:           comm,
+				BinaryPath:     bin,
+				Effects:        make(map[string]*Effect),
+				StartTimestamp: time.Now(), // Estimated
+				IsEnriched:     true,
+			}
+			t.ByPID[pid] = node
+
+			// Wire up children
+			if ppid > 0 {
+				if parent, ok := t.ByPID[ppid]; ok {
+					found := false
+					for _, cpid := range parent.ChildrenPID {
+						if cpid == pid {
+							found = true
+							break
+						}
+					}
+					if !found {
+						parent.ChildrenPID = append(parent.ChildrenPID, pid)
+					}
+				}
+			}
+		}
+		t.mu.Unlock()
+	}
 }

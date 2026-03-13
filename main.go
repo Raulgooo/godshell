@@ -2121,6 +2121,7 @@ func runDaemon() {
 	_ = os.Chmod(cfg.DBPath, 0666)
 
 	tree := ctxengine.NewProcessTree(cfg)
+	tree.DiscoverExistingProcesses()
 	events := make(chan observer.Event, 1000)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
