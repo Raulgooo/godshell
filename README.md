@@ -5,29 +5,58 @@
 
 **godshell.**
 
-Most LLM-native terminals are "probing-first": they run `top`, `ps`, and `ls` every time you ask a question. **Godshell** is "observation-first". It uses eBPF to watch your kernel's internal events since the moment it started.
+Godshell is a process observation system that uses eBPF to watch your kernel's internal events since boot, and models the system state as a snapshot ready to be queried by an LLM.
 
-When you ask "Why did that command fail?" or "What touched my SSH keys?", Godshell doesn't probe. It already has the answer.
+Think of it as a TUI for your kernel, but instead of using a CLI, you use natural language to query the system state. The use cases are very broad because you can ask anything about the system state, and the LLM can make correlations that a human might miss.
 
----
+I started this project because I realized that LLM terminals were stupid. Don't get me wrong, LLM tools for devs are great, but they are still missing that "system understanding" part. They need to probe using human commands to understand your system. Why would you make an LLM query your system the way a human would? It's just inefficient.
 
-## 🚀 The Difference
+## That's godshell's purpose: Becoming an inference layer on top of the OS
 
-> **You**: "Why is the system sluggish?"
->
-> **Godshell**: `rust-analyzer` (PID 9012) has been at 89% CPU for 14 minutes, triggered after you opened `main.rs`. It is currently indexing the workspace. **Kill it?**
+## Features
 
-Unlike other tools, Godshell stays resident. Its eBPF observers capture:
+godshell is currently very alpha, but still has some cool features that i managed to find useful:
 
-- **Process Lifecycles**: Every `execve` and `exit`.
-- **File Access**: Every `openat` (track exactly who touched your secrets).
-- **Network Flows**: Every outbound TCP connection, matched to the process.
-- **Memory Forensics**: Real-time heap scanning and anonymous region inspection.
-- **TLS Interception**: Transparently intercept SSL/TLS traffic from `libssl`, `nss`, and Go binaries.
+- snapshots: godshell allows you to take snapshots, manually or automatically every x minutes, and query them using an LLM
+- process panel: godshell allows you to view the process tree, and selecting a process you find interesting for the LLM to analyze (Tree is WIP!)
+- the godshell agent is packed with a set of tools that range from general analysis to specific forensics tasks, such as:
+  - fileless malware detection
+  - memory string extraction
+  - lineage tracking
+  - network connections
 
----
+## Demos
 
-## 🛠️ Installation
+Here i wanted to show some cool features of godshell in action, I was able to make more amusing PoCs but I couldn't get good footage of them, so here I have some PoCs that I managed to record.
+
+### Fileless malware detection
+
+![Fileless malware detection](demo.gif)
+
+### ghost/recently exited processes (It can navigate them!)
+
+![Ghost processes](deadprocs.gif)
+
+### Connection analysis of short-lived processes(it also works with active ones!)
+
+![Connection analysis](slp.gif)
+
+## **When I am able to, I'll record more demos to show-off godshell's capabilities**
+
+## Architecture
+
+godshell is composed of two main parts:
+
+- The godshell daemon: This is a systemd service that runs in the background and collects events from the kernel using eBPF
+- The godshell TUI: This is a TUI tool that allows you to interact with the godshell daemon, it is almost as speaking with your kernel.
+
+godshell daemon collects events from the kernel using eBPF and stores them in a SQLite database, it also exposes a UNIX socket via HTTP to communicate with the TUI. Currently it serves 4 main tracepoints, but I plan to add more in the future, including uprobes.
+
+## Configuration
+
+For configuration, run `godshell config`.
+
+## Installation
 
 ### Option 1: One-Line Installation (Recommended)
 
@@ -52,56 +81,29 @@ sudo ./setup.sh
 
 ---
 
-## 🧠 Architecture
-
-Godshell treats your OS state as a series of immutable snapshots.
-
-1.  **eBPF Probes**: High-performance C programs attached to kernel tracepoints.
-2.  **Observer Daemon**: Collects events via BPF ring buffers with near-zero overhead.
-3.  **Context Engine**: Correlates events into a structured "System Snapshot".
-4.  **LLM Bridge**: An AI agent (Gemini 2.5 via OpenRouter) that uses the snapshot as its ground truth.
-
----
-
-## 🛡️ Key Capabilities
-
-- **Fileless Malware Detection**: Identifies processes that have deleted their own binary from disk and are running purely in memory.
-- **Memory String Extraction**: Scans process heaps for hardcoded keys, C2 configurations, and hidden URLs.
-- **SSL Interception**: View the plaintext of outbound HTTPS requests from browsers, `curl`, or your own Go/Python/Node services without configuring proxies.
-- **Lineage Tracking**: Reconstruct the ancestor tree of any process, even if the parent has already exited.
-
 ---
 
 ## 📖 Usage
 
 ```bash
-sudo ./godshell
+sudo godshell daemon(if not running)
+
 ```
 
-Root privileges are required to load eBPF programs and read `/proc/pid/mem`.
+```bash
+godshell
 
-### Interactive TUI
+```
 
-Godshell features a dual-panel interface:
-
-- **Left Panel**: A navigable process tree. Select a process with `Enter` or `j/k`.
-- **Right Panel**: Conversational forensics. Ask Godshell anything about the system or the selected process.
+ensure to run `godshell config` for your first time running godshell.
 
 ---
 
-## 🧱 Build System
+## Roadmap
 
-We provide a comprehensive `Makefile` for developers:
-
-- `make`: Compiles everything.
-- `make ebpf`: Recompiles the BPF C code and generates Go loaders.
-- `make test`: Runs the forensics test suite.
-- `make clean`: Removes all build artifacts.
-
----
-
-## 🗺️ Roadmap
-
+- [ ] **Add more RE tools**: Add automatic API mapping via ssl libraries and more reverse engineering tools.
+- [ ] **Add better memory analysis tools**: I plan to add more memory analysis tools to the daemon, including uprobes.
+- [ ] **Add more tracepoints**: I plan to add more tracepoints to the daemon, including uprobes.
 - [ ] **Cross-Snapshot Diffs**: See exactly what changed between two points in time.
 - [ ] **YARA Integration**: Automatically scan process memory for malware signatures.
 - [ ] **Container/K8s Support**: Map PIDs back to container IDs and namespaces.
@@ -109,8 +111,8 @@ We provide a comprehensive `Makefile` for developers:
 
 ---
 
-## ⚖️ License
+## License
 
 MIT. See [LICENSE](LICENSE) for details.
 
-_Godshell is an investigatory tool for security engineers. Use responsibly._
+_Godshell is an experimental Tool. Use responsibly._
