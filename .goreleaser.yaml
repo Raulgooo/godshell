@@ -33,11 +33,12 @@ nfpms:
       - archlinux
       - apk
 
+    builds:
+      - godshell
+
     contents:
       - src: ./packaging/godshell.service
         dst: /etc/systemd/system/godshell.service
-      - src: godshell
-        dst: /usr/bin/godshell
 
     scripts:
       postinstall: ./packaging/postinstall.sh
