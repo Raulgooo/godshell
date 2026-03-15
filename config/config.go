@@ -45,6 +45,9 @@ type Config struct {
 
 	// Noise Filtering
 	IgnoredProcesses []string `json:"ignored_processes"`
+
+	// Tool Paths
+	StracePath string `json:"strace_path"`
 }
 
 func Default() Config {
@@ -64,6 +67,7 @@ func Default() Config {
 		CaptureNetwork:           true,
 		CaptureFileIO:            true,
 		IgnoredProcesses:         []string{"godshell", "systemd", "dbus-daemon"},
+		StracePath:               "strace",
 	}
 }
 

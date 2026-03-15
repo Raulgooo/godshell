@@ -26,6 +26,7 @@ func NewProcessTree(cfg config.Config) *ProcessTree {
 		IgnoredProcesses:     ignored,
 		ProcPath:             cfg.ProcPath,
 		SysPath:              cfg.SysPath,
+		StracePath:           cfg.StracePath,
 	}
 	return t
 }

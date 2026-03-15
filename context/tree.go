@@ -148,4 +148,5 @@ type ProcessTree struct {
 	IgnoredProcesses     map[string]struct{}
 	ProcPath             string
 	SysPath              string
+	StracePath           string
 }

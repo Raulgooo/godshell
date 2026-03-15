@@ -26,6 +26,7 @@ type FrozenSnapshot struct {
 	Timestamp time.Time
 	ByPID     map[uint32]*ProcessNode
 	Ghosts    map[uint32]*ProcessNode
+	StracePath string
 }
 
 // TakeSnapshot deep copies the current live ProcessTree and returns a safe, frozen copy.
@@ -37,6 +38,7 @@ func (t *ProcessTree) TakeSnapshot() *FrozenSnapshot {
 		Timestamp: time.Now(),
 		ByPID:     make(map[uint32]*ProcessNode, len(t.ByPID)),
 		Ghosts:    make(map[uint32]*ProcessNode, len(t.Ghosts)),
+		StracePath: t.StracePath,
 	}
 
 	for pid, node := range t.ByPID {
@@ -923,7 +925,7 @@ func (fs *FrozenSnapshot) TraceSyscalls(pid uint32, durationSeconds int) string 
 		durationSeconds = 5 // Default
 	}
 
-	cmd := exec.Command("strace", "-c", "-p", fmt.Sprintf("%d", pid))
+	cmd := exec.Command(fs.StracePath, "-c", "-p", fmt.Sprintf("%d", pid))
 
 	// strace prints its summary to stderr
 	var stderr bytes.Buffer

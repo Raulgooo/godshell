@@ -76,6 +76,7 @@ godshell is still experimental and "stupid" sometimes, but there's already stuff
   - network connection analysis
 
 ---
+**Note: You must have strace installed for trace to work. Future versions will remove the strace dependency.**
 
 ## demos
 
