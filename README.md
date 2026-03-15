@@ -1,118 +1,177 @@
-# godshell - speaking directly to your kernel
+<div align="center">
 
-- A new way to interact with your kernel
-  ![Godshell Demo](demo.gif)
+# godshell
+### speak directly to your kernel.
 
-**godshell.**
+![demo](demo.gif)
 
-Godshell is a process observation system that uses eBPF to watch your kernel's internal events since boot, and models the system state as a snapshot ready to be queried by an LLM.
+<img src="logo.png" width="120" alt="godshell logo"/>
+<br/>
 
-Think of it as a TUI for your kernel, but instead of using a CLI, you use natural language to query the system state. The use cases are very broad because you can ask anything about the system state, and the LLM can make correlations that a human might miss.
+[![version](https://img.shields.io/badge/version-v0.9.7-red?style=for-the-badge&logoColor=white)](https://github.com/raulgooo/godshell/releases/latest)
+[![license](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
+[![platform](https://img.shields.io/badge/platform-Linux_only-orange?style=for-the-badge&logo=linux&logoColor=white)]()
+[![kernel](https://img.shields.io/badge/kernel-5.8%2B_with_BTF-blue?style=for-the-badge)]()
+[![status](https://img.shields.io/badge/status-experimental-yellow?style=for-the-badge)]()
 
-I started this project because I realized that LLM terminals were stupid. Don't get me wrong, LLM tools for devs are great, but they are still missing that "system understanding" part. They need to probe using human commands to understand your system. Why would you make an LLM query your system the way a human would? It's just inefficient.
+<br/>
 
-## That's godshell's purpose: Becoming an inference layer on top of the OS
+**built with**
 
-## Features
+[![Go](https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white)]()
+[![eBPF](https://img.shields.io/badge/eBPF-kernel_hooks-black?style=flat-square)]()
+[![BubbleTea](https://img.shields.io/badge/BubbleTea-TUI_framework-ff69b4?style=flat-square)]()
+[![OpenRouter](https://img.shields.io/badge/OpenRouter-LLM_gateway-purple?style=flat-square)]()
+[![SQLite](https://img.shields.io/badge/SQLite-event_store-003B57?style=flat-square&logo=sqlite&logoColor=white)]()
 
-godshell is currently very alpha, but still has some cool features that i managed to find useful:
+</div>
 
-- snapshots: godshell allows you to take snapshots, manually or automatically every x minutes, and query them using an LLM
-- process panel: godshell allows you to view the process tree, and selecting a process you find interesting for the LLM to analyze (Tree is WIP!)
-- the godshell agent is packed with a set of tools that range from general analysis to specific forensics tasks, such as:
+---
+
+LLM terminal tools are amazing for some very useful cases the common developer encounters, but there are a lot of other important tasks, where they remain "stupid". They probe your system the way a human would, running commands, parsing text output,  it's slow, lossy, and defeats the whole point of having an LLM reason about your system.
+
+**godshell hooks directly into the kernel via eBPF.** It observes everything since boot: process creation, memory maps, network connections and processess relationships with files and models all of it into a structured snapshot that an LLM can query natively. no command probing. no grepping logs. the state is just *there*.
+
+> **godshell's purpose: becoming an inference layer on top of the OS.**
+
+---
+
+## architecture
+
+godshell is two things working together:
+
+**`godshell-daemon`** — a Go service managed by `systemd` that attaches eBPF tracepoints to the kernel. it collects events continuously and stores them in a SQLite database, then exposes a UNIX socket over HTTP for the TUI to consume. currently tracks 4 tracepoints, more coming.
+
+**`godshell-tui`** — built with [Bubbletea](https://github.com/charmbracelet/bubbletea). reads daemon state, renders the process tree and event timeline, lets you select processes and ask about them in natural language. queries go through [OpenRouter](https://openrouter.ai/), so you can use whatever model you want.
+
+```
+Kernel (eBPF tracepoints)
+        │
+        ▼
+  godshell-daemon (Go)
+  ├── SQLite event store
+  └── UNIX socket / HTTP API
+        │
+        ▼
+  godshell-tui (Go + Bubbletea)
+  ├── process tree
+  ├── snapshot manager
+  └── LLM agent (OpenRouter)
+```
+
+---
+
+## features
+
+godshell is still experimental and "stupid" sometimes, but there's already stuff that's genuinely useful:
+
+- **natural language queries** — ask anything about current or past system state. the LLM gets the full structured context, not the output of one command.
+- **snapshots** — take them manually or auto every X minutes. query them later. great for before/after comparisons.
+- **ghost processes** — godshell tracks processes after they exit. you can navigate and analyze them even when `ps` shows nothing. (this one is my favorite)
+- **process panel** — view the tree, pick something suspicious, hand it off to the agent.
+- **agent toolset:** —  godshell comes packed with basic observability and analysis tools, I expect to add new more useful tools and revamp the current ones with smarter implementations, but as of right now, the tools enable the following usecases for godshell:
   - fileless malware detection
   - memory string extraction
-  - lineage tracking
-  - network connections
+  - process lineage tracking
+  - network connection analysis
 
-## Demos
+---
 
-Here i wanted to show some cool features of godshell in action, I was able to make more amusing PoCs but I couldn't get good footage of them, so here I have some PoCs that I managed to record.
+## demos
 
-### Fileless malware detection
+### fileless malware detection
+![fileless malware detection](demo.gif)
 
-![Fileless malware detection](demo.gif)
+### ghost processes — navigating recently exited processes
+![ghost processes](deadprocs.gif)
 
-### ghost/recently exited processes (It can navigate them!)
+### connection analysis of short-lived processes
+![connection analysis](slp.gif)
 
-![Ghost processes](deadprocs.gif)
+### memory reading
+![memory reading](cfgdcd.png)
 
-### Connection analysis of short-lived processes(it also works with active ones!)
+### specific memory reading(heap + stack)
+![specific mem reading](scanheap.png)
 
-![Connection analysis](slp.gif)
+> **more demos coming soon**
 
-## **When I am able to, I'll record more demos to show-off godshell's capabilities**
+---
 
-## Architecture
+## installation
 
-godshell is composed of two main parts:
+### option 1: package install `(recommended)`
 
-- The godshell daemon: This is a systemd service that runs in the background and collects events from the kernel using eBPF
-- The godshell TUI: This is a TUI tool that allows you to interact with the godshell daemon, it is almost as speaking with your kernel.
+grab the package for your distro and architecture from the [latest release](https://github.com/raulgooo/godshell/releases/latest):
 
-godshell daemon collects events from the kernel using eBPF and stores them in a SQLite database, it also exposes a UNIX socket via HTTP to communicate with the TUI. Currently it serves 4 main tracepoints, but I plan to add more in the future, including uprobes.
+```bash
+# Debian/Ubuntu
+sudo dpkg -i godshell_*.deb
 
-## Configuration
+# RHEL/CentOS
+sudo rpm -i godshell_*.rpm
 
-For configuration, run `godshell config`.
+# Arch Linux
+sudo pacman -U godshell_*.pkg.tar.zst
 
-## Installation
+# Alpine
+apk add godshell_*.apk
+```
 
-### Option 1: One-Line Installation (Recommended)
+the package automatically registers `godshell-daemon` as a `systemd` service.
 
-Download the pre-built package for your distribution from the [latest release](https://github.com/raulgooo/godshell/releases/latest) and install it:
-
-- **Debian/Ubuntu**: `sudo dpkg -i godshell_*.deb`
-- **RHEL/CentOS**: `sudo rpm -i godshell_*.rpm`
-- **Arch Linux**: `sudo pacman -U godshell_*.pkg.tar.zst`
-- **Alpine**: `apk add godshell_*.apk`
-
-Installing via package automatically sets up the **Godshell Daemon** as a `systemd` service.
-
-### Option 2: Build from Source
-
-Godshell requires a modern Linux kernel (5.8+) with BTF enabled.
+### option 2: build from source
 
 ```bash
 git clone https://github.com/raulgooo/godshell
 cd godshell
-sudo ./setup.sh
+go build godshell .
+./godshell config
+./sudo godshell daemon
+./godshell
 ```
 
----
+> requires Linux kernel **5.8+** with BTF enabled. check with: `ls /sys/kernel/btf/vmlinux`
 
 ---
 
-## 📖 Usage
+## usage
 
 ```bash
-sudo godshell daemon(if not running)
-
+sudo godshell daemon   # start the daemon if it's not running
+godshell               # launch the TUI
+godshell config        # first run — set your OpenRouter and other configs, here
 ```
-
-```bash
-godshell
-
-```
-
-ensure to run `godshell config` for your first time running godshell.
 
 ---
 
-## Roadmap
+## incoming fixes
 
-- [ ] **Add more RE tools**: Add automatic API mapping via ssl libraries and more reverse engineering tools.
-- [ ] **Add better memory analysis tools**: I plan to add more memory analysis tools to the daemon, including uprobes.
-- [ ] **Add more tracepoints**: I plan to add more tracepoints to the daemon, including uprobes.
-- [ ] **Cross-Snapshot Diffs**: See exactly what changed between two points in time.
-- [ ] **YARA Integration**: Automatically scan process memory for malware signatures.
-- [ ] **Container/K8s Support**: Map PIDs back to container IDs and namespaces.
-- [ ] **Live Alerting**: EDR-style real-time notifications for suspicious eBPF events.
+- Working install script
+- Fixing a quick bug that prevents some systems from loading snapshots
+- Tools quick revamp: improving string detection
+## roadmap to v1
+
+the main blocker for v1 is the graph revamp. everything else is iterative.
+
+| status | item |
+|--------|------|
+| 🔴 blocking | **graph modeling revamp** — more efficient, richer snapshot structure for better LLM context and perf |
+| 🟡 WIP | **fix process tree heuristics** — current filtering is rough and needs a proper rethink |
+| ⬜ planned | **MCP** — Adding MCP compatibility for Antigravity, Cursor, VsC, Claude Code, etc. |
+| ⬜ planned | **more RE tools** — automatic API mapping via SSL hooks and more reverse engineering utilities |
+| ⬜ planned | **More LLM Providers** — Addition of more LLM providers aside from OpenRouter|
+| ⬜ planned | **deeper memory analysis** — uprobes-based tooling for userspace instrumentation |
+| ⬜ planned | **more tracepoints** — broader kernel coverage |
+| ⬜ planned | **cross-snapshot diffs** — see exactly what changed between two points in time |
+| ⬜ planned | **YARA integration** — automatic memory scanning against malware signatures |
+| ⬜ planned | **container/K8s support** — map PIDs to container IDs and namespaces |
+| ⬜ planned | **live alerting** — EDR-style real-time notifications for suspicious eBPF events |
 
 ---
 
-## License
+## license
 
-MIT. See [LICENSE](LICENSE) for details.
+MIT. see [LICENSE](LICENSE) for details.
 
-_Godshell is an experimental Tool. Use responsibly._
+*godshell is an experimental tool. use responsibly.*
