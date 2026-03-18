@@ -1,7 +1,7 @@
 <div align="center">
 
 # godshell
-### speak directly to your kernel.
+### An LLM-native observability layer built on eBPF
 
 ![demo](demo.gif)
 
